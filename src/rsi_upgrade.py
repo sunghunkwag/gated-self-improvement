@@ -40,7 +40,7 @@ sys.path.insert(0, HERE)
 
 import omniforge as OM  # noqa: E402
 
-LOG = os.path.join(HERE, "experiments_log.jsonl")
+LOG = os.path.join(os.path.dirname(HERE), "results", "logs", "experiments_log.jsonl")
 T0 = time.time()
 
 # frozen after dev-seed tuning (seeds 1-12); holdout never touched these
@@ -137,7 +137,8 @@ def eval_unit(cond, w, seed, tasks):
     cfg = OM.xv_CONFIG
     by_level, solved, cost = {}, 0, 0
     for j, (lvl, t) in enumerate(tasks):
-        prng = OM.lf_XorShift64Star("ev|%s|%s|%d|%d" % (cond, seed, lvl, j))
+        # AUDIT FIX: arm-independent stream (was keyed on `cond`)
+        prng = OM.lf_eval_prng(cond, seed, lvl, j)
         prog, ev, _e = OM.xv_search_task(t, w, cfg["eval_budget"], prng)
         cost += ev
         if OM.lf_solves(prog, t):
