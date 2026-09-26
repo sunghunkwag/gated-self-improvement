@@ -1,5 +1,11 @@
 # SDT Gate-Integrity / Reflective-Endorsement Experiment
 
+> **AUDIT NOTE (v2 upgrade).** Held-out evaluation was seeded with the arm name. Rerun with shared streams
+> (`results/logs/sdt_log_shared_stream.jsonl`): the collapse table is unchanged, but eval competence is
+> ARB − FULL −0.18 (ns), WIRE − FULL −0.70 (p = 0.04), CLOSED − FULL −0.60 (p = 0.04). **The phrase "worst
+> eval competence" for SDT_ARB is withdrawn.** See `results/UPGRADE_V2_RESULTS.md` A4.
+
+
 Which of three conditions of a self-modifying loop collapses first when
 broken: (1) non-arbitrary anchor, (2) open satisfaction path, (3)
 criterion-updating reflection. Holdout n=40 (seeds 101–140), frozen design.

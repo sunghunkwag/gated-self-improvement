@@ -49,7 +49,8 @@ sys.path.insert(0, HERE)
 
 import omniforge as OM  # noqa: E402
 
-LOG = os.path.join(HERE, "experiments_log.jsonl")
+LOG = os.path.join(os.path.dirname(HERE), "results", "logs",
+                   "sdt_log_shared_stream.jsonl")
 T0 = time.time()
 
 N_ROUNDS = 5
@@ -293,8 +294,8 @@ def cmd_run(s0, s1, budget, battery):
             w, meta = run_chain(arm, seed)
             solved, cost = 0, 0
             for j, (lvl, t) in enumerate(tasks):
-                prng = OM.lf_XorShift64Star("ev|%s|%s|%d|%d" % (arm, seed,
-                                                               lvl, j))
+                # AUDIT FIX (v2 upgrade): arm-independent eval stream
+                prng = OM.lf_eval_prng(arm, seed, lvl, j)
                 prog, ev, _e = OM.xv_search_task(
                     t, w, OM.xv_CONFIG["eval_budget"], prng)
                 cost += ev

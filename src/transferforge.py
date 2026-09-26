@@ -39,7 +39,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tforge as TF  # noqa: E402
 
-LOG = os.path.join(HERE, "transfer_log.jsonl")
+LOG = os.path.join(os.path.dirname(HERE), "results", "logs",
+                   "transfer_log_shared_stream.jsonl")
 T0 = time.time()
 
 OPSET_A = ["PUSHx", "PUSHi", "DUP", "OVER", "ADD", "SUB", "MUL", "INC",
@@ -229,8 +230,10 @@ def try_targets(arm, macros, seed, targets):
         if task is None:
             solved[name] = None
             continue
+        # AUDIT FIX (v2 upgrade): the solve stream was keyed on the arm
+        # ('T-<arm>|...'); every arm now searches under the same stream.
         prog, _ev, _e = search(task, OPSET_B, macros, SOLVE_BUDGET,
-                               TF.PRNG("T-%s|%s|%d" % (arm, name, seed)))
+                               TF.PRNG("T-solve|%s|%d" % (name, seed)))
         solved[name] = bool(prog is not None and TF.solves(prog, task,
                                                            macros))
     return solved
