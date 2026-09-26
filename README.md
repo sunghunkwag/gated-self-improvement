@@ -43,20 +43,54 @@ version — drag to orbit, click the result orbs — is in `index.html`; open it
 
 ## Results at a glance
 
-| Experiment | Headline | Control | Significance |
+**v2 upgrade (see [`results/UPGRADE_V2_RESULTS.md`](results/UPGRADE_V2_RESULTS.md)):** an audit found that v1's
+held-out evaluation seeded each arm's search with the arm's own name, and that v1's one-round control saw 5×
+fewer distinct tasks. The v1 compounding headline did not survive re-running. A new, preregistered,
+compute-matched experiment (`src/rsi_v2`) was then run once on 300 fresh seeds.
+
+| Experiment | Headline | Control | Status |
 |---|---|---|---|
-| **Compounding RSI** (repaired mechanism) | 5 recursive rounds beat 1 round at 5× compute, **+1.55 tasks** | vs equal-compute single round | p < 1e-4, **n = 100** (two environments) |
-| **MetaForge counterfactual** (full budget) | searcher self-upgrades v0→v3, solves **19 → 23** | frozen searcher: flat 19 for 8 waves | **+21%**, matched tasks/budgets/seeds |
+| **RSI v2: recursive vs one-shot improvement** (preregistered H1) | 5 rounds beat 1 round at 5× compute on **unseen task families**: **+0.40 tasks** (95% CI [+0.10, +0.70]) | SINGLE_5X: same tasks, same attempt streams, same 610k-execution cap, stronger gate | **supported** (Holm p = 0.0098, n = 300); small effect |
+| **RSI v2: adapting the improver itself** (preregistered H2) | adaptive improvement policy vs frozen policy: **−0.08** (CI [−0.35, +0.19]) | RECURSIVE_FROZEN: identical except the policy never learns | **null**; the compounding comes from recursion, not from learning how to improve |
+| ~~Compounding RSI (v1 repaired mechanism)~~ | ~~+1.55 over 1 round at 5×~~ → **retracted**: with shared eval streams the chain is **below** the untrained baseline (−0.70, p = 0.0005), and a data-matched single round beats it (−0.59, p = 0.002) | COLD / R1PLUS_DM, n = 100 | **retracted by audit** |
+| **MetaForge counterfactual** (full budget) | searcher self-upgrades v0→v3, solves **19 → 23** | frozen searcher: flat 19 for 8 waves | +21%, streams shared across arms; single deterministic stream (no seed variance) |
 | **Open-ended loop** (4,444 generations) | **189** certified beyond-base behaviours | admission-disabled arm: **0**, forever | exact catalog membership |
 | **Turing-complete substrate** (branches + loops) | **15** counterfactually-gated macros; solves held-out `reverse` | control arm: **0** macros | 8 seeds, offline VM |
-| **Cross-substrate transfer** | a self-found skill unlocks a substrate that can't express it, **+2.00 tasks** | vs no-transfer and random-capability | transfer p = 0.0008; learning p = 0.014 |
-| **Gate integrity (SDT)** | maps the 3 ways a self-modifying gate fails | 4 ablation arms, n = 40 | closed→vacuous, self-editable→wirehead |
+| **Cross-substrate transfer** | a self-found skill unlocks a substrate that can't express it, **+2.00 tasks** | vs no-transfer and random-capability | **survives audit** (shared streams: p = 0.001; learning premium +1.00, p = 0.008; n = 60 extension +1.98 / +1.28, p < 1e-4) |
+| **Gate integrity (SDT)** | maps the 3 ways a self-modifying gate fails | 4 ablation arms, n = 40 | collapse order survives audit; "ARB worst eval competence" withdrawn |
 
-**Honest boundaries (also measured, not hidden):** the repaired chain compounds but does *not*
-beat the untrained baseline (the container's ceiling); the meta-RL grid is a full null; open-ended
-growth is linear, not accelerating, and eventually hits a *search-dilution* wall; cross-substrate
-transfer is behavioural, and deep *composition* of a transferred skill is limited by its I/O
-interface. Details in the `results/*_RESULTS.md` files.
+**Honest boundaries (also measured, not hidden):**
+
+* **v2's positive result is small** (+0.40 of 24 tasks). It is specific to a synthetic domain whose task generator
+  has a difficulty ladder by design, and it transfers to novel compositions of shared building blocks, not to
+  unrelated domains.
+* **Adapting the improvement process did not beat a frozen improvement policy**, and its failure-mode context was
+  inert.
+* **Legacy v1 limits:** the meta-RL grid is a full null. Open-ended growth is linear, not accelerating, and
+  eventually hits a *search-dilution* wall. Deep *composition* of a transferred skill is limited by its I/O
+  interface.
+
+## RSI v2 in one paragraph
+
+Each round the system:
+
+1. attempts its training tasks;
+2. **diagnoses** why searches failed (missing operator, bad ordering, low exploration, over-specialisation,
+   composition failure);
+3. **chooses an improvement strategy** (mine behaviour-level macros, compose macros from macros, refit the prior,
+   explore, prune, or a stacked combo);
+4. builds a candidate solver and tests it **counterfactually**: screen on fresh probes, confirm on more fresh
+   probes, same search streams as the incumbent;
+5. **adopts or rolls back**;
+6. **learns from the outcome**: strategy values per failure mode, strategy intensities, and delayed credit from
+   whether the next round's new solves actually use what was adopted.
+
+Every program execution is metered against one cap shared by all arms and cross-checked against a global
+counter. Holdout tasks come from external families behind a tripwire. The evaluator, task manifests,
+hyperparameters, seeds, metric and statistics were hash-frozen in an append-only ledger and pushed (`62cbfe2`)
+before the single confirmatory run. 40 executable anti-cheat tests guard against hidden compute, condition-specific
+RNG, leakage, memorisation, evaluator edits, hard-coded answers, weakened criteria, deleted runs, and counting
+self-generated tasks.
 
 ## The core discipline
 
@@ -72,6 +106,10 @@ interface. Details in the `results/*_RESULTS.md` files.
 
 ```bash
 # no dependencies — Python 3.8+ standard library only
+python3 -m unittest discover -s tests -v          # v2 anti-cheat suite (~1 min)
+(cd src && python3 -m rsi_v2 verify && python3 -m rsi_v2 report)   # frozen v2 verdict from the ledger
+python3 experiments/audit_v1_rerun.py report       # v1 audit: old vs shared eval streams
+python3 experiments/v2_analysis.py confirm         # v2 mechanism tables (post hoc)
 python3 src/tforge.py selftest              # VM: branches, loops, halting, crash-safety
 python3 src/transferforge.py run 1 11 300   # cross-substrate transfer (n=11)
 python3 src/transferforge.py report
@@ -90,7 +128,12 @@ Long-horizon batteries run on any free CPU box (or the Kaggle kernels
 | `src/tforge.py` | Turing-complete substrate (branches, data-dependent loops) |
 | `src/openforge.py` | open-ended improvement loop (vocabulary growth + self-curriculum) |
 | `src/transferforge.py` | cross-substrate skill transfer experiment |
-| `src/rsi_upgrade.py` | the repaired compounding-RSI mechanism |
+| `src/rsi_v2/` | **v2**: adaptive improver, compute-matched arms, frozen tasks/evaluator, ledger, runner (`python3 -m rsi_v2`) |
+| `tests/test_v2_anticheat.py` | executable anti-cheat defenses (40 tests) |
+| `results/UPGRADE_V2_RESULTS.md` | v2 audit + design + preregistration + confirmatory results + limitations |
+| `results/PREREGISTRATION_V2.json`, `results/ledger/rsi_v2_ledger.jsonl` | frozen protocol; hash-chained ledger of every dev/confirm run |
+| `experiments/audit_v1_rerun.py` | v1 XV2 re-run with shared vs arm-keyed eval streams + data-matched control |
+| `src/rsi_upgrade.py` | the v1 "repaired" compounding mechanism (claim retracted by the v2 audit) |
 | `src/sdt_layer.py` | reflective-endorsement / gate-integrity experiment |
 | `index.html` | the interactive 3D demo (open locally in any browser) |
 | `results/*_RESULTS.md` | per-experiment write-ups; `results/logs/experiments_log.jsonl` raw records |

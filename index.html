@@ -76,9 +76,9 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 const results = [
-  { tag:"Compounding RSI", title:"Recursive gains compound",
-    stat:"+1.55 tasks", sub:"5 rounds vs 1 round at 5× compute · p < 1e-4 · n=100",
-    body:"After diagnosing and repairing a mechanism that was measurably harmful (−2.08 vs no learning), recursive self-improvement now compounds — reproduced across two independent environments.",
+  { tag:"Compounding RSI (v2, preregistered)", title:"Recursion beats 5× one-shot compute",
+    stat:"+0.40 tasks", sub:"5 rounds vs 1 round at 5× compute · unseen task families · Holm p = 0.0098 · n=300",
+    body:"Preregistered, run once on 300 fresh seeds, identical 610k-execution cap. Recursion compounds (small effect); learning HOW to improve (adaptive vs frozen improvement policy) is a null: −0.08. The v1 +1.55 claim was retracted by audit (arm-keyed eval randomness + data confound).",
     color:0x34e5c4, pos:[-2.6, 3.4, 1.2] },
   { tag:"MetaForge counterfactual", title:"Searcher improves searcher",
     stat:"+21%", sub:"adaptive vs FROZEN, equal tasks/budgets/seeds",
@@ -93,7 +93,7 @@ const results = [
     body:"The same loop ported onto a universal VM (not straight-line list ops). Every admitted macro passed a counterfactual gate; the control admits none. Held-out algorithms like reverse fall out.",
     color:0x7ad9ff, pos:[3.3, 1.5, 1.5] },
   { tag:"Cross-substrate transfer", title:"Skills generalize across media",
-    stat:"+2.00 tasks", sub:"transfer p=0.0008 · learning premium p=0.014",
+    stat:"+2.00 tasks", sub:"shared-stream re-run: transfer p=0.001 · learning premium p=0.008 · n=60 extension p<1e-4",
     body:"A skill discovered on an arithmetic substrate lets a structure-only substrate — which cannot express arithmetic natively — solve tasks it scores 0 on. Beats random-capability controls.",
     color:0xffcf5a, pos:[0.0, 4.6, -2.2] },
   { tag:"Gate integrity (SDT)", title:"Which gates resist wireheading",
