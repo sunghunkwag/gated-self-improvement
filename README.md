@@ -10,6 +10,11 @@
 </p>
 
 <p align="center">
+  <a href="https://sunghunkwag.github.io/research/gated-self-improvement/">Matched-compute results and limits</a> ·
+  <a href="https://sunghunkwag.github.io/research/recursive-self-improvement/">What recursive self-improvement is, and how to test it</a>
+</p>
+
+<p align="center">
   <a href="https://deepwiki.com/sunghunkwag/gated-selfimprovement"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
 </p>
 
