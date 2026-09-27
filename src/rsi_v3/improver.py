@@ -50,6 +50,7 @@ Arms (identical code path, flags differ; identical execution cap):
                           preference x diagnosed need)
 """
 import math
+import time
 
 from rsi_v2 import substrate as S
 from rsi_v2 import solver as SV
@@ -792,8 +793,10 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
                                     zip(per, inc_s)), i))
                 picks = [i for _y, i in sorted(ys)][:hp["k_screen"]]
             else:
+                t_meta = time.perf_counter()
                 picks = rank(pool, policy, model, v, diag_on, inc_mean, nd,
                              stream(seed, "select", r), hp["k_screen"])
+                rec["meta_seconds"] = round(time.perf_counter() - t_meta, 4)
             for i in picks:
                 c = pool[i]
                 if c.x is None:
@@ -862,9 +865,12 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
             state.inc_rates.append((tot(inc_s)[0] + tot(inc_c)[0])
                                    / float(len(inc_s) + len(inc_c)))
         if learn and rows:
+            t_meta = time.perf_counter()
             for x, y in rows:
                 model.add(x, y)
             model.refit()
+            rec["meta_seconds"] = round(rec.get("meta_seconds", 0.0)
+                                        + time.perf_counter() - t_meta, 4)
         rec["n_rows"] = len(rows)
         rec["model_n"] = model.n
         rec["n_macros"] = len(state.cfg.macros)
@@ -998,4 +1004,8 @@ def run_arm(arm, seed, hp=None):
         "arm": arm, "seed": seed, "cap": cap, "world_cap": wcap,
         "spent": arm_meter.spent, "global_delta": delta, "worlds": worlds,
         "model_w": [round(x, 6) for x in model.w] if model else None,
-        "model_n": model.n if model else 0}
+        "model_n": model.n if model else 0,
+        # meta-controller compute: zero program executions (every execution
+        # is metered above); its own cost is arithmetic, counted here
+        "meta_ops": dict(model.ops) if model else None,
+        "meta_program_executions": 0}

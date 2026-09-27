@@ -98,7 +98,11 @@ def run_unit(job):
            "train_solved": sum(x["train_solved"] for x in ws) / float(len(ws)),
            "n_macros": sum(x["n_macros"] for x in ws) / float(len(ws)),
            "worlds": ws, "model_w": rec["model_w"],
-           "model_n": rec["model_n"]}
+           "model_n": rec["model_n"], "meta_ops": rec["meta_ops"],
+           "meta_program_executions": rec["meta_program_executions"],
+           "meta_seconds": round(sum(rd.get("meta_seconds", 0.0)
+                                     for x in ws for rd in x["rounds"]), 3),
+           "rank_validity": rank_validity_unit(ws)}
     out.update(SG.self_score(cfgs[-1], seed))
     if arm == "COLD":
         out["replicate_ext"] = sum(rep)
@@ -123,6 +127,61 @@ def _append(path, rec):
         os.makedirs(d)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, sort_keys=True) + "\n")
+
+
+def rank_validity_unit(worlds):
+    """Does the learned ranking predict REAL FUTURE cross-family gain? For
+    every round, the predictor's scores mu were computed BEFORE the screened
+    candidates were evaluated; y is their realized paired gain on fresh
+    META-VAL probes (families disjoint from the train families). Returns
+    per-world mean within-round rank correlation (Spearman) and the pooled
+    (mu, y) pairs' Pearson correlation."""
+    out = []
+    for wd in worlds:
+        rhos, pairs = [], []
+        for rd in wd["rounds"]:
+            sc = [(s["mu"], s["y_mean"]) for s in rd.get("screened", [])
+                  if "y_mean" in s]
+            pairs += sc
+            if len(sc) >= 3 and len({m for m, _y in sc}) > 1:
+                rho = _spearman([m for m, _y in sc], [y for _m, y in sc])
+                if rho is not None:
+                    rhos.append(rho)
+        out.append({"spearman_within_round": (sum(rhos) / len(rhos))
+                    if rhos else None,
+                    "pearson": _pearson([m for m, _y in pairs],
+                                        [y for _m, y in pairs])})
+    return out
+
+
+def _rank(v):
+    order = sorted(range(len(v)), key=lambda i: v[i])
+    r = [0.0] * len(v)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            r[order[k]] = (i + j) / 2.0
+        i = j + 1
+    return r
+
+
+def _pearson(a, b):
+    n = len(a)
+    if n < 3:
+        return None
+    ma, mb = sum(a) / n, sum(b) / n
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va <= 0 or vb <= 0:
+        return None
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (va * vb) ** 0.5
+
+
+def _spearman(a, b):
+    return _pearson(_rank(a), _rank(b))
 
 
 def meta_quality_by_world(r):
