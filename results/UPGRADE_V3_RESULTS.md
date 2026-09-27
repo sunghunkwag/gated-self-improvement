@@ -43,6 +43,7 @@ test.
   effect is hard to get in this domain.
 
 ---
+
 ## 1. Why v2's H2 failed (the starting diagnosis)
 
 v2's adaptive improver (RECURSIVE_FULL) lost to its frozen twin by −0.08 tasks (n = 300). Post-hoc analysis
@@ -118,6 +119,7 @@ logged per unit, and every program execution goes through the meter.
 | Frozen protocol | one-shot `PREREG_FREEZE`: prereg sha, hp sha, code hash of every rsi_v3 + rsi_v2 file, evaluator hash, task-library and confirm-manifest digests | `test_frozen_protocol_if_frozen` |
 | Decision rule | primary alone at α; secondaries only if the primary passes (Holm among themselves) | `test_secondaries_blocked_when_primary_fails`, `test_primary_full_alpha_secondaries_holm` |
 | Append-only record | hash-chained ledger; locked, re-verifying appends | `test_stale_writer_cannot_fork_the_chain` |
+
 ## 4. Development history (dev seeds 3001–3040 only; every run is in the ledger)
 
 Every dev iteration was recorded as `DEV_START` / `DEV_END` in `results/ledger/rsi_v3_ledger.jsonl`, with its per-unit
