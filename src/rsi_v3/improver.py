@@ -990,6 +990,7 @@ def run_arm(arm, seed, hp=None):
     g0 = S.EXEC.n
     cfgs, worlds = [], []
     model = None
+    ops_done = {"rows": 0, "refits": 0, "predictions": 0, "flops": 0}
     if arm not in ("COLD", "SINGLE_COMPUTE_MATCHED"):
         model = Ridge(feat_dim(), hp["ridge_lam"])
         model.frozen = arm not in LEARNING_ARMS
@@ -1004,6 +1005,9 @@ def run_arm(arm, seed, hp=None):
             state = run_single(wseed, train, batches, wm, hp, log)
         else:
             if arm == "ADAPTIVE_NOCARRY":
+                if w > 1:        # keep the reset predictor's cost counted
+                    for k in model.ops:
+                        ops_done[k] += model.ops[k]
                 model = Ridge(feat_dim(), hp["ridge_lam"])
             policy = {"FROZEN_META": "FROZEN", "ADAPTIVE_META": "LEARN",
                       "NODIAG_META": "LEARN", "HEURISTIC_META": "HEURISTIC",
@@ -1031,5 +1035,6 @@ def run_arm(arm, seed, hp=None):
         "model_n": model.n if model else 0,
         # meta-controller compute: zero program executions (every execution
         # is metered above); its own cost is arithmetic, counted here
-        "meta_ops": dict(model.ops) if model else None,
+        "meta_ops": {k: ops_done[k] + model.ops[k] for k in model.ops}
+        if model else None,
         "meta_program_executions": 0}

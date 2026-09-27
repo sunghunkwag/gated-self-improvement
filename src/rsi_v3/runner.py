@@ -448,10 +448,23 @@ def build_report(led):
                         one_sided=True)
         comps[c["name"]] = dict(sm, a=c["a"], b=c["b"], role=c["role"])
         pvals[c["name"]] = sm["p"]
-    adj = ST.holm(pvals)
-    for k in comps:
-        comps[k]["p_holm"] = adj[k]
-        comps[k]["pass"] = bool(comps[k]["mean"] > 0 and adj[k] < alpha)
+    # fixed-sequence gatekeeping (preregistered): the primary contrast is
+    # tested alone at alpha; only if it is supported are the secondary
+    # contrasts tested, Holm-adjusted among themselves at alpha. FWER <=
+    # alpha over all confirmatory contrasts.
+    prim_name = [k for k in comps if comps[k]["role"] == "primary"]
+    assert len(prim_name) == 1
+    prim_name = prim_name[0]
+    comps[prim_name]["p_adj"] = pvals[prim_name]
+    comps[prim_name]["pass"] = bool(comps[prim_name]["mean"] > 0
+                                    and pvals[prim_name] < alpha)
+    sec = {k: pvals[k] for k in comps if k != prim_name}
+    adj = ST.holm(sec) if sec else {}
+    for k in sec:
+        comps[k]["p_adj"] = adj[k]
+        comps[k]["tested"] = comps[prim_name]["pass"]
+        comps[k]["pass"] = bool(comps[prim_name]["pass"]
+                                and comps[k]["mean"] > 0 and adj[k] < alpha)
     rep["confirmatory"] = comps
     expl = {}
     for a, b, field in prereg["exploratory_contrasts"]:
@@ -471,10 +484,78 @@ def build_report(led):
                               "spent", "self_solved")} for a in arms}
     rep["caps"] = {a: sorted({tab[(a, s)]["cap"] for s in seeds})
                    for a in arms}
+    rep["verification"] = verification(tab, seeds, arms)
     prim = [c for c in comps.values() if c["role"] == "primary"][0]
     rep["verdict"] = ("PRIMARY PASSED" if prim["pass"]
                       else "PRIMARY NOT SUPPORTED (null)")
     return rep
+
+
+def verification(tab, seeds, arms):
+    """Pre-registered verification checks reported with the verdict."""
+    v = {}
+    W = len(tab[(arms[0], seeds[0])]["ext_w"])
+    # 1. the advantage persists / grows across later worlds
+    for b in ("FROZEN_META", "ADAPTIVE_NOCARRY"):
+        if b not in arms:
+            continue
+        per_w = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
+                     - tab[(b, s)]["ext_w"][w] for s in seeds)
+                 / float(len(seeds)) for w in range(W)]
+        trend = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
+                     - tab[(b, s)]["ext_w"][w] for w in range(W // 2, W))
+                 - sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
+                       - tab[(b, s)]["ext_w"][w] for w in range(W // 2))
+                 for s in seeds]
+        sm = ST.summary(trend, "v3verif|trend|%s" % b)
+        v["per_world_ADAPTIVE_minus_%s" % b] = {
+            "per_world": [round(x, 4) for x in per_w],
+            "first_half": sum(per_w[:W // 2]) / (W // 2),
+            "second_half": sum(per_w[W // 2:]) / (W - W // 2),
+            "second_minus_first_per_seed": sm}
+    # 2. the learned ranking predicts REAL FUTURE cross-family gain
+    rho = []
+    for s in seeds:
+        xs = [w["spearman_within_round"] for w in
+              tab[("ADAPTIVE_META", s)]["rank_validity"][1:]
+              if w["spearman_within_round"] is not None]
+        if xs:
+            rho.append(sum(xs) / len(xs))
+    v["rank_validity_ADAPTIVE"] = dict(
+        ST.summary(rho, "v3verif|rho", one_sided=True),
+        note="per-seed mean within-round Spearman between the predictor's "
+             "score (computed BEFORE evaluation) and the realized paired "
+             "gain on fresh cross-family META-VAL probes, worlds >= 2")
+    v["rank_validity_by_world"] = [
+        (lambda xs: sum(xs) / len(xs) if xs else None)(
+            [tab[("ADAPTIVE_META", s)]["rank_validity"][w]
+             ["spearman_within_round"] for s in seeds
+             if tab[("ADAPTIVE_META", s)]["rank_validity"][w]
+             ["spearman_within_round"] is not None]) for w in range(W)]
+    # 3. meta-controller compute is logged and uses no program executions
+    mc = {}
+    for a in arms:
+        ops = [tab[(a, s)].get("meta_ops") for s in seeds]
+        if ops and ops[0]:
+            mc[a] = {k: sum(o[k] for o in ops) / float(len(ops))
+                     for k in ops[0]}
+            mc[a]["seconds"] = sum(tab[(a, s)].get("meta_seconds", 0.0)
+                                   for s in seeds) / float(len(seeds))
+        assert all(tab[(a, s)].get("meta_program_executions", 0) == 0
+                   for s in seeds)
+    v["meta_controller_compute_mean_per_run"] = mc
+    v["meta_controller_program_executions"] = 0
+    # 4. identical compute conditions, exact metering
+    v["caps_identical"] = len({tab[(a, s)]["cap"] for a in arms
+                               for s in seeds}) == 1
+    v["world_caps_identical"] = len({tab[(a, s)]["world_cap"] for a in arms
+                                     for s in seeds}) == 1
+    v["all_within_cap"] = all(tab[(a, s)]["spent"] <= tab[(a, s)]["cap"]
+                              for a in arms for s in seeds)
+    v["all_metered_exactly"] = all(tab[(a, s)]["spent"]
+                                   == tab[(a, s)]["global_delta"]
+                                   for a in arms for s in seeds)
+    return v
 
 
 def cmd_report(out):
