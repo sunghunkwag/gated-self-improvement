@@ -192,7 +192,11 @@ class ProcessController(object):
     def choose(self, knob, ctx, prng):
         """Returns (option index, was_default). Default option until the
         knob model has hp["knob_min_rows"] rows of experience; then a
-        Thompson draw from its posterior."""
+        Thompson draw from its posterior, with a switching margin: the
+        default is left only if the drawn advantage over it exceeds
+        hp["knob_margin"] (return-to-go units). With flat evidence the
+        posterior tightens around zero differences and deviations become
+        rare; a large learned advantage is acted on."""
         d = self.hp["proc_defaults"][knob]
         m = self.knob[knob]
         if not (self.use_process and self.learn
@@ -203,6 +207,8 @@ class ProcessController(object):
                 for o in range(len(KNOBS[knob]))]
         m.ops["predictions"] += len(vals)
         best = max(range(len(vals)), key=lambda o: (vals[o], o == d))
+        if best != d and vals[best] - vals[d] < self.hp["knob_margin"]:
+            best = d
         return best, best == d
 
     # ------------------------------------------------------- value estimates

@@ -117,7 +117,10 @@ HP = {
     # controller.KNOBS, indices below
     "proc_defaults": {"attempt": 0, "shape": 1, "explore": 1, "gate": 0},
     "track_n": 16, "track_evals": 6,    # tracking probes, evaluations/world
-    "knob_lam": 3.0, "knob_min_rows": 10, "knob_noise_var": 0.005,
+    # knob noise var = empirical variance of return-to-go (dev pc-02:
+    # 0.0026); margin ~ 1/5 of its sd
+    "knob_lam": 3.0, "knob_min_rows": 10, "knob_noise_var": 0.003,
+    "knob_margin": 0.01,
     "knn_min": 3, "knn_k": 8, "retrieval_eta": 20.0,
     "gen_kappa": (0.0, 0.5, 1.0), "default_pref": 0.001,
     "alloc_value_temp": 0.01, "track_weight": 1.0, "return_weight": 0.5,
