@@ -14,9 +14,13 @@ deterministic.
 - [FAQ](FAQ) — "is this AGI?", "why no LLM?", "is it a toy?"
 
 ## 30-second version
-Two arms run the same loop; one may admit self-discovered building blocks (GATED),
-one may not (FROZEN). The gap is the evidence. Positive results: compounding RSI
-(p<1e-4, n=100), searcher-improves-searcher (+21% vs frozen), certified open-ended
-expansion (189 vs 0), Turing-complete port (15 vs 0 macros), cross-substrate
-transfer (+2.00, p=0.0008). Reported nulls: no absolute lift over untrained
-baseline; meta-RL grid flat; growth linear not accelerating.
+Two arms run the same loop; one may admit self-discovered building blocks (GATED), one may not (FROZEN). The gap
+is the evidence.
+
+- **v2 (preregistered, n = 300, identical compute, unseen task families):** recursive self-improvement beats
+  one-shot improvement with 5× compute by +0.40 tasks (Holm p = 0.0098). Adapting the improvement policy itself
+  is a null (−0.08).
+- **Other positives:** searcher-improves-searcher (+21% vs frozen), certified open-ended expansion (189 vs 0),
+  Turing-complete port (15 vs 0 macros), cross-substrate transfer (+2.00, p = 0.001 after re-audit).
+- **Retracted:** the v1 "compounding" headline (arm-keyed eval RNG + data confound).
+- **Nulls:** meta-RL grid flat; growth linear, not accelerating.

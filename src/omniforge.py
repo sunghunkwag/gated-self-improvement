@@ -67,6 +67,15 @@ class lf_XorShift64Star(object):
         return seq[self.below(len(seq))]
 lf_FORBIDDEN_MODULES = {'random', 'secrets', 'numpy', 'torch', 'time', 'pickle', 'multiprocessing', 'threading', 'socket', 'subprocess'}
 
+def lf_eval_prng(cond, seed, lvl, j):
+    """Held-out evaluation stream, IDENTICAL for every arm (common random
+    numbers). AUDIT FIX (v2 upgrade): the key used to embed the condition
+    name ('ev|<cond>|...'), so counterfactual arms were scored under
+    different search randomness. The arm name never enters the key now;
+    only the COLD2 noise-floor replicate deliberately draws stream 1."""
+    stream = 1 if cond == 'COLD2' else 0
+    return lf_XorShift64Star('ev|s%d|%s|%d|%d' % (stream, seed, lvl, j))
+
 def lf__source_tokens(src):
     return set(''.join((c if c.isalnum() or c == '_' else ' ' for c in src.lower())).split())
 lf_GENESIS_PREV = '0' * 64
@@ -829,6 +838,7 @@ def xv_build_chains(seed):
     (gpool, glog) = ([], [])
     inc = xv_uniform_prior()
     gated_evals = 0
+    gated_gate_evals = 0
     for rnd in range(1, cfg['n_rounds'] + 1):
         for (i, lvl) in enumerate(cfg['src_levels']):
             t = xv_draw_task(lvl, seed, 'source', 'gsrc|%d|%d' % (rnd, i))
@@ -838,13 +848,14 @@ def xv_build_chains(seed):
         cand = xv_fit_prior(gpool)
         probes = [xv_draw_task(3, seed, 'source', 'probe|%d|%d' % (rnd, j)) for j in range(cfg['n_probe'])]
         (acc, info) = xv_gate(inc, cand, probes, cfg['gate_budget'], 'gate|%s|%d' % (seed, rnd))
+        gated_gate_evals += info['inc_cost'] + info['cand_cost']
         info['round'] = rnd
         glog.append(info)
         if acc:
             inc = cand
         if xv_substrate_fingerprint() != fp0:
             sys.exit('SUBSTRATE FINGERPRINT DRIFT -- aborting')
-    meta = {'seed': seed, 'fingerprint': fp0, 'chain_prior_shas': [xv_prior_sha(x) for x in chain], 'five_x_sha': xv_prior_sha(five_x), 'gated_sha': xv_prior_sha(inc), 'gate_log': glog, 'chain_evals': chain_evals, 'fivex_evals': fivex_evals, 'gated_evals': gated_evals, 'budget_per_arm': budget_chain}
+    meta = {'seed': seed, 'fingerprint': fp0, 'chain_prior_shas': [xv_prior_sha(x) for x in chain], 'five_x_sha': xv_prior_sha(five_x), 'gated_sha': xv_prior_sha(inc), 'gate_log': glog, 'chain_evals': chain_evals, 'fivex_evals': fivex_evals, 'gated_evals': gated_evals, 'gated_gate_evals': gated_gate_evals, 'gated_total_evals': gated_evals + gated_gate_evals, 'budget_per_arm': budget_chain, 'gated5_compute_matched': gated_evals + gated_gate_evals <= budget_chain}
     return {'chain': chain, 'five_x': five_x, 'gated': inc, 'meta': meta}
 
 def xv_prior_for(cond, chains):
@@ -872,7 +883,7 @@ def xv_run_unit(cond, seed, chains, tasks):
     by_level = {}
     cost = 0
     for (j, (lvl, t)) in enumerate(tasks):
-        prng = lf_XorShift64Star('ev|%s|%s|%d|%d' % (cond, seed, lvl, j))
+        prng = lf_eval_prng(cond, seed, lvl, j)
         (prog, ev_, _e) = xv_search_task(t, w, cfg['eval_budget'], prng)
         cost += ev_
         if lf_solves(prog, t):
@@ -1935,7 +1946,7 @@ def xvi_run_unit(cond, seed, chains, tasks):
     by_level = {}
     cost = 0
     for (j, (lvl, t)) in enumerate(tasks):
-        prng = lf_XorShift64Star('ev|%s|%s|%d|%d' % (cond, seed, lvl, j))
+        prng = lf_eval_prng(cond, seed, lvl, j)
         (prog, ev_, _e) = xvi_search_with(engine, t, prior, cfg['eval_budget'], prng)
         cost += ev_
         if lf_solves(prog, t):
@@ -3247,7 +3258,7 @@ def gx_run_unit(cond, seed, chains, tasks):
     multi_gate_solves = 0
     max_exp_depth = 0
     for (j, (lvl, t)) in enumerate(tasks):
-        prng = lf_XorShift64Star('ev|%s|%s|%d|%d' % (cond, seed, lvl, j))
+        prng = lf_eval_prng(cond, seed, lvl, j)
         if engine == 'unigram':
             w = prior
             (prog, ev_, _e) = gx_search_task_u(t, w, cfg['eval_budget'], prng)
@@ -6390,7 +6401,7 @@ Usage:
   python3 rsi_upgrade.py report2
 """
 up_HERE = os.path.dirname(os.path.abspath(__file__))
-up_LOG = os.path.join(up_HERE, 'experiments_log.jsonl')
+up_LOG = os.path.join(os.path.dirname(up_HERE), 'results', 'logs', 'experiments_log.jsonl')
 up_T0 = time.time()
 up_LAM = 0.4
 up_STRENGTH = 8.0
@@ -6466,7 +6477,7 @@ def up_eval_unit(cond, w, seed, tasks):
     cfg = xv_CONFIG
     (by_level, solved, cost) = ({}, 0, 0)
     for (j, (lvl, t)) in enumerate(tasks):
-        prng = lf_XorShift64Star('ev|%s|%s|%d|%d' % (cond, seed, lvl, j))
+        prng = lf_eval_prng(cond, seed, lvl, j)
         (prog, ev, _e) = xv_search_task(t, w, cfg['eval_budget'], prng)
         cost += ev
         if lf_solves(prog, t):

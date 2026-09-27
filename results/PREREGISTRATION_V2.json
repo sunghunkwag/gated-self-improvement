@@ -1,0 +1,194 @@
+{
+ "algorithm": {
+  "actions": [
+   "MINE",
+   "COMPOSE",
+   "REFIT",
+   "EXPLORE",
+   "PRUNE",
+   "MINE+REFIT",
+   "MINE+COMPOSE+REFIT",
+   "COMPOSE+REFIT",
+   "PRUNE+MINE"
+  ],
+  "failure_modes": [
+   "MISSING_OP",
+   "BAD_ORDER",
+   "LOW_EXPLORE",
+   "OVERSPEC",
+   "COMPOSE_FAIL"
+  ],
+  "improver_version": "rsi_v2-improver-1",
+  "loop": "attempt -> diagnose failure -> choose improvement strategy -> build candidate solver -> counterfactual test (screen on 6 probes, confirm on 6 fresh probes, paired streams) -> adopt/rollback -> learn from outcome (strategy values + intensities + delayed credit from next round's solves)",
+  "package": "src/rsi_v2 (every file hashed at freeze; code_hash in the PREREG_FREEZE ledger record)",
+  "strategies": [
+   "MINE",
+   "COMPOSE",
+   "REFIT",
+   "EXPLORE",
+   "PRUNE"
+  ]
+ },
+ "arms": [
+  "COLD",
+  "SINGLE_5X",
+  "RECURSIVE_FROZEN",
+  "RECURSIVE_FULL",
+  "RECURSIVE_NODIAG"
+ ],
+ "compute": {
+  "SINGLE_5X": "1 round: 5 x attempt (each task gets the same 5 attempt streams as the 5 recursive rounds) + 5 x gate budget",
+  "cap_per_arm": 610000,
+  "evaluation": "identical for all arms: 3000 executions per holdout task, stream keyed by (seed, split, task index) only",
+  "recursive_arms": "5 rounds x (40 tasks x attempt_budget + gate_round_budget)",
+  "unit": "one program execution on one input (every execution is metered; global-counter cross-check)"
+ },
+ "confirmatory_contrasts": [
+  {
+   "a": "RECURSIVE_FULL",
+   "b": "SINGLE_5X",
+   "name": "H1_full_vs_single5x",
+   "role": "primary"
+  },
+  {
+   "a": "RECURSIVE_FULL",
+   "b": "RECURSIVE_FROZEN",
+   "name": "H2_full_vs_frozen",
+   "role": "secondary"
+  }
+ ],
+ "dev_history": "ledger records dev-00 .. dev-07 (including the failed designs dev-00..dev-05). The frozen design is dev-07.",
+ "exploratory_contrasts": [
+  [
+   "RECURSIVE_FROZEN",
+   "SINGLE_5X",
+   "ext"
+  ],
+  [
+   "RECURSIVE_NODIAG",
+   "RECURSIVE_FULL",
+   "ext"
+  ],
+  [
+   "RECURSIVE_FULL",
+   "COLD",
+   "ext"
+  ],
+  [
+   "SINGLE_5X",
+   "COLD",
+   "ext"
+  ],
+  [
+   "RECURSIVE_FROZEN",
+   "COLD",
+   "ext"
+  ],
+  [
+   "RECURSIVE_FULL",
+   "SINGLE_5X",
+   "in"
+  ],
+  [
+   "RECURSIVE_FULL",
+   "RECURSIVE_FROZEN",
+   "in"
+  ],
+  [
+   "COLD",
+   "COLD",
+   "replicate_ext"
+  ],
+  [
+   "RECURSIVE_FULL",
+   "COLD",
+   "self_solved"
+  ],
+  [
+   "RECURSIVE_FULL",
+   "SINGLE_5X",
+   "train_solved"
+  ]
+ ],
+ "hp": {
+  "adopt_cost_ratio": 0.9,
+  "attempt_budget": 2000,
+  "gate_probe_budget": 1000,
+  "gate_round_budget": 42000,
+  "k_candidates": 4,
+  "macro_len_max": 12,
+  "mine_max_len": 6,
+  "mine_min_len": 2,
+  "mine_min_support": 2,
+  "n_rounds": 5,
+  "near_miss_fit": 0.5,
+  "new_macro_boost": 2.0,
+  "p_random_max": 0.6,
+  "pool_kappa": 2.0,
+  "prior_floor": 0.08,
+  "q_alpha": 0.5,
+  "refit_strength": 8.0,
+  "single_bold": 3.0,
+  "single_bold_actions": [
+   "MINE",
+   "MINE+REFIT",
+   "MINE+COMPOSE+REFIT"
+  ],
+  "theta0": {
+   "COMPOSE": 2.0,
+   "EXPLORE": 0.3,
+   "MINE": 3.0,
+   "PRUNE": 0.3,
+   "REFIT": 0.4
+  },
+  "theta_down": 0.7,
+  "theta_hi": {
+   "COMPOSE": 6.0,
+   "EXPLORE": 0.7,
+   "MINE": 8.0,
+   "PRUNE": 0.7,
+   "REFIT": 0.9
+  },
+  "theta_lo": {
+   "COMPOSE": 1.0,
+   "EXPLORE": 0.1,
+   "MINE": 1.0,
+   "PRUNE": 0.1,
+   "REFIT": 0.1
+  },
+  "theta_up": 1.5,
+  "ucb_c": 0.3
+ },
+ "hp_sha": "1abc700150f8ce69bc259a35d4502b0061e946cd64065b0f17a1e9b9f9cfdfd2",
+ "power": "dev-07 (n=12): H1 mean +1.08 (sd 2.11), H2 mean +0.42 (sd 1.38); dev estimates are optimistic because they survived design iteration. With n=300, one-sided alpha 0.025 (Holm worst case) and power 0.8, the minimum detectable mean differences are about +0.34 tasks for H1 (~1/3 of the dev estimate) and +0.22 tasks for H2 (~1/2 of the dev estimate).",
+ "primary_metric": {
+  "definition": "number of the 24 external-family holdout tasks per seed whose train examples AND hidden longer test examples are all reproduced exactly by the program the arm's final solver finds within the evaluation budget",
+  "field": "ext",
+  "split": "holdout_ext"
+ },
+ "seeds": {
+  "confirm": "1001-1300",
+  "dev": "1-40 (only 1-12 used)"
+ },
+ "statistics": {
+  "alpha": 0.05,
+  "also_reported": "mean, SD, 95% percentile bootstrap CI, wins/ties/losses, dz",
+  "decision_rule": "a hypothesis is supported iff mean(a - b) > 0 and its Holm-adjusted p < alpha; otherwise it is reported as a null result",
+  "multiplicity": "Holm step-down over H1 and H2",
+  "test": "paired (by seed) sign-flip permutation test, one-sided H_a: mean(a - b) > 0, 20000 permutations from a fixed deterministic stream"
+ },
+ "stopping_and_integrity": "Every (arm, seed) in 1001-1300 runs exactly once after the PREREG_FREEZE ledger record; no interim looks; no parameter, code, task or analysis change after freeze (enforced by hashes); a crashed unit may only be re-run deterministically (UNIT_RESTART record); the report is produced by the frozen runner and states the result whatever it is.",
+ "tasks": {
+  "library_digest": "664871fb8bba1eccb97b4376d1612604125e9aa4cbfeaa907310dee21f0c1765",
+  "note": "external holdout families are never seen in train/probe; all tasks behaviour-distinct across splits",
+  "splits": {
+   "holdout_ext": 24,
+   "holdout_in": 16,
+   "probe": 60,
+   "train": 40
+  },
+  "version": "rsi_v2-tasks-1"
+ },
+ "title": "rsi_v2 confirmatory battery: does adapting the improvement process compound beyond equal-compute one-shot improvement?",
+ "written_before_confirmatory_runs": true
+}

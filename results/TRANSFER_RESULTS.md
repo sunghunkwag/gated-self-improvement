@@ -1,5 +1,11 @@
 # Cross-Substrate Skill Transfer
 
+> **AUDIT NOTE (v2 upgrade).** Target solves were seeded with the arm name (`'T-<arm>|…'`) and the committed
+> raw log held only seeds 1–3. Rerun with one shared stream (`results/logs/transfer_log_shared_stream.jsonl`):
+> seeds 1–11 give transfer +2.00 (p = 0.001) and learning premium +1.00 (p = 0.008); seeds 1–60 give +1.98 and
+> +1.28 (both p < 1e-4). **The claim survives.** See `results/UPGRADE_V2_RESULTS.md` A4.
+
+
 Does a skill the system DISCOVERS on one substrate enable solving on a
 DIFFERENT substrate whose native vocabulary CANNOT express it? Two
 vocabularies over one universal VM: A (arithmetic) vs B (structure, no
