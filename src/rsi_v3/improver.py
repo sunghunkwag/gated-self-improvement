@@ -69,9 +69,9 @@ CARRY_ARMS = ("ADAPTIVE_META", "NODIAG_META")   # predictor persists across
                                                 # worlds; NOCARRY resets it
 
 HP = {
-    "n_worlds": 4,
+    "n_worlds": 10,
     "n_rounds": 5,
-    "attempt_budget": 2000,
+    "attempt_budget": 1000,
     "gate_probe_budget": 600,
     "gate_round_budget": 48000,
     "k_screen": 8,
@@ -89,8 +89,9 @@ HP = {
     # estimated on dev seeds from split-half reliability (used only by
     # learning arms to denoise the finalist choice)
     "noise_var": 0.055, "prior_var": 0.0015,
-    "gate": "strict", "finalist": "measured",
-    "screen_n": 6, "confirm_n": 6,
+    # adoption gate chosen on FROZEN_META only (strongest control on dev)
+    "gate": "always", "finalist": "measured",
+    "screen_n": 6, "confirm_n": 6, "diag_params": False,
 }
 
 N_STATE = 15
@@ -541,17 +542,29 @@ def allocate(v, ok, size, diag_on, hp):
 def severity(v, diag_on):
     """Per-action failure severity in [0, 1] that PARAMETERISES the
     proposals (bundle vs single operators, prior step size, flattening).
-    Without diagnosis every action gets the neutral 0.5."""
+    Without diagnosis every action gets the neutral 0.5. Used only when
+    hp["diag_params"] is on (dev-11); the go/no-go / frozen configuration
+    (dev-10) keeps fixed proposal parameters and lets the diagnosis act
+    through allocation, evidence-gated pruning and the predictor."""
     if not diag_on:
         return {a: 0.5 for a in ACTIONS}
     return {a: max(0.0, min(1.0, v[MATCHED[a]])) for a in ACTIONS}
+
+
+FIXED_PRIOR = (("PRIOR[sol0.4]", "sol", 0.4), ("PRIOR[sol0.2]", "sol", 0.2),
+               ("PRIOR[near0.3]", "near", 0.3), ("PRIOR[sol0.7]", "sol", 0.7),
+               ("PRIOR[sol+near]", "both", 0.4))
+FIXED_EXPLORE = (("EXPLORE[0.3]", 0.3, 0), ("EXPLORE[depth+1]", 0.0, 1),
+                 ("EXPLORE[0.15]", 0.15, 0), ("EXPLORE[0.5]", 0.5, 0),
+                 ("EXPLORE[0.3+depth]", 0.3, 1))
 
 
 def generate_pool(state, traces, train, v, info, meter, hp, diag_on, size):
     ok = availability(state, traces, diag_on, info, hp)
     alloc = allocate(v, ok, size, diag_on, hp)
     nd = needs(v)
-    sev = severity(v, diag_on)
+    sev = severity(v, diag_on) if hp["diag_params"] else {
+        a: 0.5 for a in ACTIONS}
     raw = {}
     for a in ACTIONS:
         n = alloc.get(a, 0)
@@ -573,6 +586,13 @@ def generate_pool(state, traces, train, v, info, meter, hp, diag_on, size):
                   and t.best_prog is not None
                   and t.best_fit >= hp["near_miss_fit"]]
             lam = round(0.2 + 0.5 * sev[a], 3)    # worse ordering -> bigger
+            if not hp["diag_params"]:
+                src = {"sol": sp, "near": nm, "both": sp + nm}
+                opts = [(lb, refit(state.cfg, src[k], lm, hp))
+                        for lb, k, lm in FIXED_PRIOR]
+                raw[a] = [(lb, c, []) for lb, c in opts
+                          if c is not None][:n]
+                continue
             opts = [("PRIOR[sol%.2f]" % lam, refit(state.cfg, sp, lam, hp)),
                     ("PRIOR[sol%.2f]" % (lam / 2),
                      refit(state.cfg, sp, lam / 2, hp)),
@@ -584,6 +604,10 @@ def generate_pool(state, traces, train, v, info, meter, hp, diag_on, size):
             raw[a] = [(lb, c, []) for lb, c in opts if c is not None][:n]
         elif a == "EXPLORE":
             eps = round(0.1 + 0.4 * sev[a], 3)    # less traction -> flatter
+            if not hp["diag_params"]:
+                raw[a] = [(lb, explore_cfg(state.cfg, e, dp, hp), [])
+                          for lb, e, dp in FIXED_EXPLORE][:n]
+                continue
             opts = [("EXPLORE[%.2f]" % eps, explore_cfg(state.cfg, eps, 0,
                                                         hp)),
                     ("EXPLORE[depth+1]", explore_cfg(state.cfg, 0.0, 1, hp)),

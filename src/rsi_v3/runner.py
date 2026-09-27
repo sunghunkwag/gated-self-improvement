@@ -19,7 +19,7 @@ import time
 from rsi_v2 import substrate as S
 from rsi_v2 import selfgen as SG
 from rsi_v2 import stats as ST
-from rsi_v2.ledger import Ledger
+from .ledger import SafeLedger as Ledger
 from . import tasks as T
 from . import improver as I
 from . import evaluate as E
@@ -29,8 +29,13 @@ SRC = os.path.dirname(PKG)
 ROOT = os.path.dirname(SRC)
 LEDGER_PATH = os.path.join(ROOT, "results", "ledger", "rsi_v3_ledger.jsonl")
 PREREG_PATH = os.path.join(ROOT, "results", "PREREGISTRATION_V3.json")
-DEV_LOG = os.path.join(ROOT, "results", "logs", "v3_dev.jsonl")
-CONFIRM_LOG = os.path.join(ROOT, "results", "logs", "v3_confirm.jsonl")
+# compact per-unit summaries (plain JSONL, mirrored in the ledger) and the
+# FULL per-unit detail (gzip JSONL; its sha256 is in the summary/ledger)
+DEV_LOG = os.path.join(ROOT, "results", "logs", "v3_dev_units.jsonl")
+DEV_DETAIL = os.path.join(ROOT, "results", "logs", "v3_dev_detail.jsonl.gz")
+CONFIRM_LOG = os.path.join(ROOT, "results", "logs", "v3_confirm_units.jsonl")
+CONFIRM_DETAIL = os.path.join(ROOT, "results", "logs",
+                              "v3_confirm_detail.jsonl.gz")
 DEV_ITERATE = tuple(range(3001, 3041))
 DEV_CHECK = tuple(range(3101, 3201))
 FORBIDDEN = tuple(range(1, 41)) + tuple(range(101, 201)) + tuple(
@@ -125,8 +130,35 @@ def _append(path, rec):
     d = os.path.dirname(path)
     if not os.path.isdir(d):
         os.makedirs(d)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, sort_keys=True) + "\n")
+    line = json.dumps(rec, sort_keys=True) + "\n"
+    if path.endswith(".gz"):
+        import gzip
+        with gzip.open(path, "at", encoding="utf-8") as f:   # new member
+            f.write(line)
+    else:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+
+
+def compact(full):
+    """Summary kept in the ledger / plain log: every field the report and
+    the verification checks need, plus the sha256 binding the full detail
+    record (per-round pools, screened candidates, features) to the chain."""
+    out = {k: v for k, v in full.items() if k != "worlds"}
+    out["detail_sha"] = S.sha256_text(S.canon(full))
+    out["mq_w"] = meta_quality_by_world(full)
+    out["adopt_w"] = [sum(1 for rd in wd["rounds"] if rd.get("adopted"))
+                      for wd in full["worlds"]]
+    acts = {}
+    for wd in full["worlds"]:
+        for rd in wd["rounds"]:
+            a = rd.get("adopted_action")
+            if a:
+                acts[a] = acts.get(a, 0) + 1
+    out["adopted_actions"] = acts
+    out["final_cfg_shas"] = [wd["final_cfg_sha"] for wd in full["worlds"]]
+    out["macros_w"] = [wd["n_macros"] for wd in full["worlds"]]
+    return out
 
 
 def rank_validity_unit(worlds):
@@ -197,11 +229,12 @@ def meta_quality(r, first_world=2):
     """Mean realized paired gain (candidate - incumbent, cross-family
     META-VAL probes) of the candidates this arm chose to test, over worlds
     >= first_world: the direct measure of how well the improver picks
-    improvements once cross-world learning could have happened."""
-    ys = [s["y_mean"] for wd in r["worlds"][first_world - 1:]
-          for rd in wd["rounds"] for s in rd.get("screened", [])
-          if "y_mean" in s]
-    return sum(ys) / len(ys) if ys else None
+    improvements once cross-world learning could have happened. (Each
+    world screens the same number of candidates, so the mean of per-world
+    means equals the pooled mean.)"""
+    mq = r["mq_w"] if "mq_w" in r else meta_quality_by_world(r)
+    mq = mq[first_world - 1:]
+    return sum(mq) / len(mq) if mq else None
 
 
 def summarize(results, arms, seeds):
@@ -216,18 +249,17 @@ def summarize(results, arms, seeds):
         n = float(len(rs))
         mq = [meta_quality(r) for r in rs]
         mq = [x for x in mq if x is not None]
+        mqw = [r["mq_w"] for r in rs]
         summ[a] = {"n": len(rs), "ext": sum(r["ext"] for r in rs) / n,
                    "in": sum(r["in"] for r in rs) / n,
                    "train": sum(r["train_solved"] for r in rs) / n,
                    "macros": sum(r["n_macros"] for r in rs) / n,
                    "ext_w": [sum(r["ext_w"][w] for r in rs) / n
                              for w in range(len(rs[0]["ext_w"]))],
-                   "adopt": sum(sum(1 for wd in r["worlds"]
-                                    for rd in wd["rounds"]
-                                    if rd.get("adopted")) for r in rs) / n,
+                   "adopt": sum(sum(r["adopt_w"]) for r in rs) / n,
                    "meta_quality": (sum(mq) / len(mq)) if mq else None,
-                   "mq_w": [sum(meta_quality_by_world(r)[w] for r in rs) / n
-                            for w in range(len(rs[0]["worlds"]))],
+                   "mq_w": [sum(x[w] for x in mqw) / n
+                            for w in range(len(mqw[0]))],
                    "spent": sum(r["spent"] for r in rs) / n}
     con = {}
     for a, b in (("ADAPTIVE_META", "FROZEN_META"),
@@ -288,8 +320,10 @@ def _dev_like(kind, label, seeds, hp_over, workers, arms, allowed):
 
     def on_result(r):
         r["phase"], r["label"] = kind, label
-        _append(DEV_LOG, r)
-        results.append(r)
+        _append(DEV_DETAIL, r)
+        c = compact(r)
+        _append(DEV_LOG, c)
+        results.append(c)
     _pool_map([(a, s, hp) for s in seeds for a in arms], workers, on_result)
     summ, con = summarize(results, arms, seeds)
     led.append(kind + "_END", {
@@ -371,8 +405,10 @@ def cmd_confirm(workers):
 
     def on_result(r):
         r["phase"] = "confirm"
-        _append(CONFIRM_LOG, r)
-        led.append("UNIT_END", r)
+        _append(CONFIRM_DETAIL, r)
+        c = compact(r)
+        _append(CONFIRM_LOG, c)
+        led.append("UNIT_END", c)
         print("  %-24s seed %d ext %2d [%.0fs]" % (r["arm"], r["seed"],
                                                    r["ext"],
                                                    time.time() - t0),

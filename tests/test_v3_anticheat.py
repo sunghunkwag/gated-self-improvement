@@ -26,7 +26,7 @@ sys.path.insert(0, SRC)
 
 from rsi_v2 import substrate as S               # noqa: E402
 from rsi_v2 import solver as SV                 # noqa: E402
-from rsi_v2.ledger import Ledger                # noqa: E402
+from rsi_v3.ledger import SafeLedger as Ledger  # noqa: E402
 from rsi_v3 import tasks as T                   # noqa: E402
 from rsi_v3 import improver as I                # noqa: E402
 from rsi_v3 import evaluate as E                # noqa: E402
@@ -97,7 +97,8 @@ class TestCRNV3(unittest.TestCase):
         b = I.run_arm("ADAPTIVE_META", SEED, TINY)[1]
         ra, rb = a["worlds"][0]["rounds"][0], b["worlds"][0]["rounds"][0]
         strip = lambda r: json.dumps(
-            {k: v for k, v in r.items() if k not in ("model_n", "n_rows")},
+            {k: v for k, v in r.items()
+             if k not in ("model_n", "n_rows", "meta_seconds")},
             sort_keys=True)
         self.assertEqual(strip(ra), strip(rb))
 
@@ -204,25 +205,37 @@ class TestDiagnosisAblation(unittest.TestCase):
         """Mechanical proof: with the diagnosis switched off, the same
         state produces a different candidate pool (allocation differs),
         on most first rounds across seeds."""
-        differ = 0
-        seeds = (3001, 3002, 3003, 3004)
-        for sd in seeds:
-            key = I.world_key(sd, 1)
-            train, _b = T.improver_view(key, 1)
-            st = I.State()
-            m = S.Meter(10 ** 12)
-            comp = SV.Compiled(st.cfg)
-            traces = [I.attempt(st, comp, t, i, 300,
-                                I.stream(key, "attempt", 1, i), m)
-                      for i, t in enumerate(train)]
-            v, _vd, info = I.diagnose(st, traces, 1, TINY)
-            p1, a1, _ = I.generate_pool(st, traces, train, v, info, m, TINY,
-                                        True, 24)
-            p2, a2, _ = I.generate_pool(st, traces, train, v, info, m, TINY,
-                                        False, 24)
-            if [c.label for c in p1] != [c.label for c in p2]:
-                differ += 1
-        self.assertGreaterEqual(differ, 3)
+        hp = I.HP        # the real (frozen-candidate) configuration
+        differ, n = 0, 0
+        for sd in (3001, 3002, 3003, 3004):
+            for w in (1, 2):
+                key = I.world_key(sd, w)
+                train, _b = T.improver_view(key, 1)
+                st = I.State()
+                m = S.Meter(10 ** 12)
+                comp = SV.Compiled(st.cfg)
+                traces = [I.attempt(st, comp, t, i, hp["attempt_budget"],
+                                    I.stream(key, "attempt", 1, i), m)
+                          for i, t in enumerate(train)]
+                v, _vd, info = I.diagnose(st, traces, 1, hp)
+                p1, _a1, _ = I.generate_pool(st, traces, train, v, info, m,
+                                             hp, True, hp["pool_size"])
+                p2, _a2, _ = I.generate_pool(st, traces, train, v, info, m,
+                                             hp, False, hp["pool_size"])
+                n += 1
+                differ += [c.label for c in p1] != [c.label for c in p2]
+        self.assertGreaterEqual(differ, 6)      # >= 75% of real states
+
+    def test_diagnosis_enters_the_predictor(self):
+        """Ranking channel: the matched failure-score features are non-zero
+        with diagnosis and exactly zero in the NODIAG ablation."""
+        c = I.Cand("MINE", "MINE[0]", SV.base_config(), [0.0] * I.N_DELTA,
+                   1.0)
+        v = [0.7] * I.N_STATE
+        on = I.features(c, v, True, 0.0)
+        off = I.features(c, v, False, 0.0)
+        self.assertNotEqual(on, off)
+        self.assertEqual(len(on), I.feat_dim())
 
     def test_pruning_requires_evidence(self):
         st = I.State()
@@ -283,6 +296,28 @@ class TestProtocolV3(unittest.TestCase):
             if r["kind"] in ("UNIT_START", "UNIT_END") and \
                     r["body"].get("phase") == "confirm":
                 self.assertGreater(r["seq"], fz)
+
+
+class TestLedgerConcurrency(unittest.TestCase):
+    def test_stale_writer_cannot_fork_the_chain(self):
+        """Reproduces the dev-11 race: a writer holding a stale copy
+        appends after another writer. SafeLedger must re-chain on top of
+        the true head, keeping the file verifiable."""
+        d = tempfile.mkdtemp()
+        try:
+            p = os.path.join(d, "l.jsonl")
+            a = Ledger(p)
+            a.append("X", {"i": 0})
+            stale = Ledger(p)
+            a.append("X", {"i": 1})
+            a.append("X", {"i": 2})
+            stale.append("X", {"i": 3})    # stale in-memory head
+            fresh = Ledger(p)
+            self.assertTrue(fresh.verify())
+            self.assertEqual([r["body"]["i"] for r in fresh.records],
+                             [0, 1, 2, 3])
+        finally:
+            shutil.rmtree(d)
 
 
 class TestDeterminismV3(unittest.TestCase):
