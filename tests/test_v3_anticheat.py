@@ -47,16 +47,23 @@ def _src(name):
 
 class TestComputeV3(unittest.TestCase):
     def test_equal_caps_and_metered(self):
-        caps = set()
+        """Identical caps within each comparison family: the v3 arms, and
+        the process-control arms (whose cap adds the same tracking budget
+        to every arm)."""
+        caps = {"v3": set(), "process": set()}
         for arm in I.ARMS:
             cfgs, rec = I.run_arm(arm, SEED, TINY)
-            caps.add(rec["cap"])
+            fam = "process" if arm in I.PROCESS_ARMS else "v3"
+            caps[fam].add(rec["cap"])
             self.assertEqual(rec["spent"], rec["global_delta"])
             self.assertLessEqual(rec["spent"], rec["cap"])
             for w in rec["worlds"]:
                 self.assertLessEqual(w["spent"], rec["world_cap"])
             self.assertEqual(len(cfgs), TINY["n_worlds"])
-        self.assertEqual(len(caps), 1)
+        self.assertEqual(len(caps["v3"]), 1)
+        self.assertEqual(len(caps["process"]), 1)
+        self.assertEqual(min(caps["process"]) - min(caps["v3"]),
+                         TINY["n_worlds"] * I.track_cap(TINY))
 
     def test_hidden_compute_detected(self):
         orig = I.run_recursive
@@ -81,7 +88,7 @@ class TestComputeV3(unittest.TestCase):
 
 class TestCRNV3(unittest.TestCase):
     def test_streams_never_use_arm(self):
-        for name in ("improver.py", "evaluate.py"):
+        for name in ("improver.py", "evaluate.py", "controller.py"):
             tree = ast.parse(_src(name))
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call)
@@ -138,7 +145,7 @@ class TestSplitsV3(unittest.TestCase):
             I.run_arm("ADAPTIVE_META", SEED, TINY)
 
     def test_improver_has_no_final_holdout_path(self):
-        for name in ("improver.py", "metamodel.py"):
+        for name in ("improver.py", "metamodel.py", "controller.py"):
             tree = ast.parse(_src(name))
             names = {n.attr for n in ast.walk(tree)
                      if isinstance(n, ast.Attribute)}
@@ -203,7 +210,7 @@ class TestMetaPredictor(unittest.TestCase):
                     and node.func.id == "gate_eval"):
                 arg = node.args[1]
                 self.assertTrue(isinstance(arg, ast.Name) and arg.id in (
-                    "screen", "confirm", "probes"))
+                    "screen", "confirm", "probes", "track_probes"))
 
 
 class TestConfirmatoryDecisionRule(unittest.TestCase):
@@ -356,6 +363,167 @@ class TestProtocolV3(unittest.TestCase):
             if r["kind"] in ("UNIT_START", "UNIT_END") and \
                     r["body"].get("phase") == "confirm":
                 self.assertGreater(r["seq"], fz)
+
+
+PTINY = copy.deepcopy(TINY)
+PTINY.update({"n_worlds": 3})
+
+
+def _run_capture(arm, seed=SEED, hp=PTINY):
+    """run_arm, also returning the arm's ProcessController object."""
+    got = []
+    orig = I.process_controller
+
+    def grab(a, h):
+        got.append(orig(a, h))
+        return got[-1]
+    I.process_controller = grab
+    try:
+        cfgs, rec = I.run_arm(arm, seed, hp)
+    finally:
+        I.process_controller = orig
+    return cfgs, rec, got[0]
+
+
+class TestProcessController(unittest.TestCase):
+    """memory -> process control: the three-arm comparison differs ONLY in
+    persistent improvement memory, the control is the unchanged v3 process,
+    memory carries no solver content, and learned memory really changes
+    process decisions."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.runs = {a: _run_capture(a) for a in I.PROCESS_ARMS}
+
+    def test_frozen_reproduces_v3_frozen_decisions(self):
+        _c, v3 = I.run_arm("FROZEN_META", SEED, PTINY)
+        _c, fr, _k = self.runs["FROZEN"]
+        self.assertEqual([w["final_cfg_sha"] for w in v3["worlds"]],
+                         [w["final_cfg_sha"] for w in fr["worlds"]])
+        for a, b in zip(v3["worlds"], fr["worlds"]):
+            for ra, rb in zip(a["rounds"], b["rounds"]):
+                self.assertEqual(ra["pool"], rb["pool"])
+                self.assertEqual(ra.get("adopted"), rb.get("adopted"))
+
+    def test_carry_and_nocarry_identical_in_world_one(self):
+        mc, nc = self.runs["MEMORY_CARRY"][1], self.runs["NO_CARRY"][1]
+        strip = lambda r: json.dumps(
+            {k: v for k, v in r.items() if k != "meta_seconds"},
+            sort_keys=True)
+        self.assertEqual([strip(r) for r in mc["worlds"][0]["rounds"]],
+                         [strip(r) for r in nc["worlds"][0]["rounds"]])
+        self.assertEqual(mc["worlds"][0]["final_cfg_sha"],
+                         nc["worlds"][0]["final_cfg_sha"])
+
+    def test_nocarry_wipes_memory_carry_keeps_it(self):
+        nc, mc = self.runs["NO_CARRY"][1], self.runs["MEMORY_CARRY"][1]
+        self.assertEqual(nc["memory_resets"], PTINY["n_worlds"] - 1)
+        self.assertEqual(mc["memory_resets"], 0)
+        for w in nc["worlds"]:
+            self.assertEqual(w["memory"]["worlds"], 1)
+            self.assertLessEqual(w["memory"]["rounds"], PTINY["n_rounds"])
+        eps = [w["memory"]["episodes"] for w in mc["worlds"]]
+        self.assertEqual(eps, sorted(eps))
+        self.assertEqual([w["memory"]["worlds"] for w in mc["worlds"]],
+                         list(range(1, PTINY["n_worlds"] + 1)))
+
+    def test_memory_holds_no_solver_content(self):
+        """Only numbers and labels can cross a world boundary: no solver
+        config, candidate, program, macro token or primitive name."""
+        ctrl = self.runs["MEMORY_CARRY"][2]
+        prims = set(S.NAMES)
+        seen = set()
+
+        def walk(o):
+            if id(o) in seen:
+                return
+            seen.add(id(o))
+            self.assertNotIsInstance(o, (SV.SolverConfig, I.Cand))
+            if isinstance(o, str):
+                self.assertNotIn("<", o)
+                self.assertNotIn(o, prims)
+            elif isinstance(o, dict):
+                for k, v in o.items():
+                    walk(k)
+                    walk(v)
+            elif isinstance(o, (list, tuple, set)):
+                for v in o:
+                    walk(v)
+            elif hasattr(o, "__dict__"):
+                walk(vars(o))
+        state = {k: v for k, v in vars(ctrl).items() if k != "hp"}
+        walk(state)
+        self.assertGreater(len(ctrl.episodes), 0)
+
+    def test_frozen_controller_never_learns(self):
+        _c, rec, ctrl = self.runs["FROZEN"]
+        self.assertEqual(rec["meta_ops"]["rows"], 0)
+        self.assertEqual(ctrl.value.n, 0)
+        self.assertTrue(all(m.n == 0 for m in ctrl.knob.values()))
+        for w in rec["worlds"]:
+            for rd in w["rounds"]:
+                self.assertTrue(all(rd["plan_default"].values()))
+                self.assertFalse(rd["pool_learned"])
+
+    def test_caps_identical_and_metered(self):
+        caps = {(r["cap"], r["world_cap"]) for _c, r, _k in
+                self.runs.values()}
+        self.assertEqual(len(caps), 1)
+        for _c, r, _k in self.runs.values():
+            self.assertLessEqual(r["spent"], r["cap"])
+            self.assertEqual(r["spent"], r["global_delta"])
+            self.assertEqual(r["meta_program_executions"], 0)
+            for w in r["worlds"]:
+                self.assertLessEqual(w["spent"], r["world_cap"])
+
+    def test_meta_compute_counted_across_resets(self):
+        for arm in ("NO_CARRY", "MEMORY_CARRY"):
+            _c, rec, ctrl = self.runs[arm]
+            per_world = [w["memory"]["value_rows"]
+                         + sum(w["memory"]["knob_rows"].values())
+                         for w in rec["worlds"]]
+            total = sum(per_world) if arm == "NO_CARRY" else per_world[-1]
+            self.assertEqual(rec["meta_ops"]["rows"], total)
+
+    def test_learned_memory_changes_process_decisions(self):
+        """With accumulated memory the controller changes what is generated
+        (pool differs from the default pool) and, once it has enough round
+        experience, round-level process options -- not just scores."""
+        rec = self.runs["MEMORY_CARRY"][1]
+        later = [rd for w in rec["worlds"][1:] for rd in w["rounds"]]
+        self.assertTrue(any(rd["pool_learned"] and rd["pool_jaccard"] < 1.0
+                            for rd in later))
+        last = rec["worlds"][-1]["rounds"]
+        self.assertTrue(any(not all(rd["plan_default"].values())
+                            for rd in last))
+        # the rank-only ablation never changes the process
+        ro = self.runs["MEMORY_RANKONLY"][1]
+        for w in ro["worlds"]:
+            for rd in w["rounds"]:
+                self.assertEqual(rd["pool"], rd["pool_default"])
+                self.assertTrue(all(rd["plan_default"].values()))
+
+    def test_tracking_probes_are_metaval_and_disjoint(self):
+        key = I.world_key(SEED, 1)
+        man = T.seed_manifest(key)
+        sig = lambda tr: json.dumps([[list(x), list(y)] for x, y in tr])
+        mv = {sig(r["train"]) for r in man["metaval"]}
+        train, allb = T.improver_view(key, 8)
+        R_ = PTINY["n_rounds"]
+        spare = [sig(t.train) for b in allb[R_:] for t in b]
+        used = [sig(t.train) for b in allb[:R_] for t in b]
+        self.assertTrue(all(x in mv for x in spare))
+        self.assertFalse(set(spare) & set(used))
+        self.assertGreaterEqual(len(spare), PTINY["track_n"] + 2 * R_)
+
+    def test_default_grid_equals_v3_generator(self):
+        """The variant grid's default portion reproduces the v3 pool for
+        real states (so FROZEN is the unchanged v3 process)."""
+        _c, v3 = I.run_arm("FROZEN_META", SEED + 1, PTINY)
+        _c, fr, _k = _run_capture("FROZEN", SEED + 1)
+        pa = [rd["pool"] for w in v3["worlds"] for rd in w["rounds"]]
+        pb = [rd["pool"] for w in fr["worlds"] for rd in w["rounds"]]
+        self.assertEqual(pa, pb)
 
 
 class TestLedgerConcurrency(unittest.TestCase):

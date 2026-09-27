@@ -37,7 +37,8 @@ DEV_DETAIL = os.path.join(ROOT, "results", "logs", "v3_dev_detail.jsonl.gz")
 CONFIRM_LOG = os.path.join(ROOT, "results", "logs", "v3_confirm_units.jsonl")
 CONFIRM_DETAIL = os.path.join(ROOT, "results", "logs",
                               "v3_confirm_detail.jsonl.gz")
-DEV_ITERATE = tuple(range(3001, 3041))
+DEV_ITERATE = tuple(range(3001, 3101))    # 3041-3100 added for the
+                                          # process-controller phase
 DEV_CHECK_SPENT = tuple(range(3101, 3201))   # v3devcheck-01: NO_GO
 DEV_CHECK = tuple(range(3201, 3301))         # reserved for the next go/no-go
 FORBIDDEN = tuple(range(1, 41)) + tuple(range(101, 201)) + tuple(
@@ -110,6 +111,8 @@ def run_unit(job):
            "meta_seconds": round(sum(rd.get("meta_seconds", 0.0)
                                      for x in ws for rd in x["rounds"]), 3),
            "rank_validity": rank_validity_unit(ws)}
+    if "memory_resets" in rec:
+        out["memory_resets"] = rec["memory_resets"]
     out.update(SG.self_score(cfgs[-1], seed))
     if arm == "COLD":
         out["replicate_ext"] = sum(rep)
@@ -160,7 +163,43 @@ def compact(full):
     out["adopted_actions"] = acts
     out["final_cfg_shas"] = [wd["final_cfg_sha"] for wd in full["worlds"]]
     out["macros_w"] = [wd["n_macros"] for wd in full["worlds"]]
+    if "memory_resets" in full:
+        out.update(process_summary(full["worlds"]))
     return out
+
+
+def process_summary(worlds):
+    """Process-control arms: per world, how far the controller's actual
+    decisions moved away from the default (v3) process, plus the tracking
+    horizon (T_0 .. T_R, cross-family transfer) and the retrieval weight."""
+    div, knob_nd, alloc_l1, jac, learned = [], [], [], [], []
+    for wd in worlds:
+        rs = wd["rounds"]
+        nd = [sum(1 for k, dflt in rd["plan_default"].items() if not dflt)
+              / float(len(rd["plan_default"])) for rd in rs]
+        l1 = []
+        for rd in rs:
+            a, b = rd.get("alloc") or {}, rd.get("alloc_default") or {}
+            keys = set(a) | set(b)
+            tot = float(max(1, sum(b.values())))
+            l1.append(sum(abs(a.get(x, 0) - b.get(x, 0)) for x in keys)
+                      / tot)
+        knob_nd.append(sum(nd) / len(nd))
+        alloc_l1.append(sum(l1) / len(l1))
+        jac.append(sum(rd["pool_jaccard"] for rd in rs) / len(rs))
+        learned.append(sum(1 for rd in rs if rd["pool_learned"]) / len(rs))
+    return {"knob_nondefault_w": [round(x, 4) for x in knob_nd],
+            "alloc_l1_w": [round(x, 4) for x in alloc_l1],
+            "pool_jaccard_w": [round(x, 4) for x in jac],
+            "pool_learned_w": [round(x, 4) for x in learned],
+            "transfer_w": [wd["transfer"] for wd in worlds],
+            "track_w": [wd["track"] for wd in worlds],
+            "omega_w": [wd["memory"]["omega"] for wd in worlds],
+            "plans_w": [[[rd["plan"][k] for k in ("attempt", "shape",
+                                                  "explore", "gate")]
+                         for rd in wd["rounds"]] for wd in worlds],
+            "adopted_w": [[rd.get("adopted") for rd in wd["rounds"]]
+                          for wd in worlds]}
 
 
 def rank_validity_unit(worlds):
@@ -263,8 +302,20 @@ def summarize(results, arms, seeds):
                    "mq_w": [sum(x[w] for x in mqw) / n
                             for w in range(len(mqw[0]))],
                    "spent": sum(r["spent"] for r in rs) / n}
+        if "pool_jaccard_w" in rs[0]:
+            W = len(rs[0]["pool_jaccard_w"])
+            for f in ("pool_jaccard_w", "knob_nondefault_w", "alloc_l1_w"):
+                summ[a][f] = [round(sum(r[f][w] for r in rs) / n, 4)
+                              for w in range(W)]
+            tr = [[r["transfer_w"][w] for r in rs
+                   if r["transfer_w"][w] is not None] for w in range(W)]
+            summ[a]["transfer_w"] = [round(sum(x) / len(x), 5) if x else None
+                                     for x in tr]
     con = {}
-    for a, b in (("ADAPTIVE_META", "FROZEN_META"),
+    for a, b in (("MEMORY_CARRY", "NO_CARRY"), ("MEMORY_CARRY", "FROZEN"),
+                 ("NO_CARRY", "FROZEN"), ("MEMORY_CARRY", "MEMORY_RANKONLY"),
+                 ("MEMORY_RANKONLY", "FROZEN"),
+                 ("ADAPTIVE_META", "FROZEN_META"),
                  ("ADAPTIVE_META", "SINGLE_COMPUTE_MATCHED"),
                  ("ADAPTIVE_META", "NODIAG_META"),
                  ("ADAPTIVE_META", "ADAPTIVE_NOCARRY"),
@@ -301,6 +352,11 @@ def _print(summ, con):
                   m["train"], m["macros"], m["adopt"],
                   "%.4f" % m["meta_quality"] if m["meta_quality"] is not None
                   else "-", m["spent"]))
+    for a, m in summ.items():
+        if "pool_jaccard_w" in m:
+            print("%-24s pool~default %s knobs!=default %s transfer %s" % (
+                a, m["pool_jaccard_w"], m["knob_nondefault_w"],
+                m["transfer_w"]))
     for k, v in con.items():
         print("  %-52s %+.4f [%+.3f, %+.3f] p=%.4f w/t/l=%s" % (
             k, v["mean"], v["ci95"][0], v["ci95"][1], v["p"], v["w/t/l"]))
