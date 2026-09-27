@@ -424,6 +424,27 @@ def collect(led, phase, arms, seeds):
     return tab, missing
 
 
+def gatekeeping(comps, alpha):
+    """Preregistered fixed-sequence gatekeeping, in place. The primary
+    contrast is tested alone at alpha; only if it is supported are the
+    secondary contrasts tested, Holm-adjusted among themselves at alpha.
+    Family-wise error <= alpha over all confirmatory contrasts."""
+    prim = [k for k in comps if comps[k]["role"] == "primary"]
+    assert len(prim) == 1
+    prim = prim[0]
+    comps[prim]["p_adj"] = comps[prim]["p"]
+    comps[prim]["pass"] = bool(comps[prim]["mean"] > 0
+                               and comps[prim]["p"] < alpha)
+    sec = {k: comps[k]["p"] for k in comps if k != prim}
+    adj = ST.holm(sec) if sec else {}
+    for k in sec:
+        comps[k]["p_adj"] = adj[k]
+        comps[k]["tested"] = comps[prim]["pass"]
+        comps[k]["pass"] = bool(comps[prim]["pass"] and comps[k]["mean"] > 0
+                                and adj[k] < alpha)
+    return comps
+
+
 def build_report(led):
     prereg, fz = check_frozen(led)
     seeds = parse_seeds(prereg["seeds"]["confirm"])
@@ -440,31 +461,14 @@ def build_report(led):
     assert metric == "ext" and prereg["primary_metric"]["split"] == \
         E.PRIMARY_SPLIT, "primary metric must be the FINAL external holdout"
     alpha = prereg["statistics"]["alpha"]
-    comps, pvals = {}, {}
+    comps = {}
     for c in prereg["confirmatory_contrasts"]:
         d = [tab[(c["a"], s)][metric] - tab[(c["b"], s)][metric]
              for s in seeds]
         sm = ST.summary(d, "v3confirm|%s-%s" % (c["a"], c["b"]),
                         one_sided=True)
         comps[c["name"]] = dict(sm, a=c["a"], b=c["b"], role=c["role"])
-        pvals[c["name"]] = sm["p"]
-    # fixed-sequence gatekeeping (preregistered): the primary contrast is
-    # tested alone at alpha; only if it is supported are the secondary
-    # contrasts tested, Holm-adjusted among themselves at alpha. FWER <=
-    # alpha over all confirmatory contrasts.
-    prim_name = [k for k in comps if comps[k]["role"] == "primary"]
-    assert len(prim_name) == 1
-    prim_name = prim_name[0]
-    comps[prim_name]["p_adj"] = pvals[prim_name]
-    comps[prim_name]["pass"] = bool(comps[prim_name]["mean"] > 0
-                                    and pvals[prim_name] < alpha)
-    sec = {k: pvals[k] for k in comps if k != prim_name}
-    adj = ST.holm(sec) if sec else {}
-    for k in sec:
-        comps[k]["p_adj"] = adj[k]
-        comps[k]["tested"] = comps[prim_name]["pass"]
-        comps[k]["pass"] = bool(comps[prim_name]["pass"]
-                                and comps[k]["mean"] > 0 and adj[k] < alpha)
+    gatekeeping(comps, alpha)
     rep["confirmatory"] = comps
     expl = {}
     for a, b, field in prereg["exploratory_contrasts"]:

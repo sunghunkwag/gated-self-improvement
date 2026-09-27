@@ -7,12 +7,16 @@ mode, a Q-table that never ranked differently from its context-free
 ablation, and a probe reward drawn from TRAIN families while the final
 objective was cross-family. v3 changes the learning problem itself:
 
-1. SHARED CONTINUOUS CONTEXTUAL PREDICTOR (metamodel.Ridge). Features are
-   the full continuous diagnosis vector (all failure scores, search
-   progress, diversity, entropy, dead-macro ratio, composition depth...),
-   the candidate's action, and the candidate's concrete deltas (macros
-   added/removed, their length/support/depth/residual coverage, prior
-   shift, exploration change), with action x diagnosis interactions.
+1. SHARED CONTINUOUS CONTEXTUAL PREDICTOR (metamodel.Ridge), one model for
+   every action. The diagnosis is a continuous 15-dim vector (all failure
+   scores, search progress, diversity, entropy, dead-macro ratio,
+   composition depth, ...). Predictor features: the candidate's action,
+   its concrete deltas (macros added/removed, their length/support/depth/
+   residual coverage, prior shift, exploration change), the generator's
+   preference, action x its matched failure score, and the incumbent's
+   progress on the probe. (The full action x diagnosis block was tried
+   and overfit in leave-seeds-out CV on dev data -- ledger DEV_NOTE
+   diagnosis-after-dev08 -- so the compact form is used.)
 2. DENSE PAIRED TRAINING DATA: every (candidate, probe) pair of every
    counterfactual test is one row, y = progress(candidate) -
    progress(incumbent) on the same stream (progress = 1 if solved, else
@@ -33,8 +37,10 @@ objective was cross-family. v3 changes the learning problem itself:
      PRUNE    removal of dead macros -- generated ONLY when the evidence
               says the vocabulary is over-specialised
 5. The predictor RANKS the pool; only k candidates get the scarce
-   counterfactual-test budget. Adoption uses the same unbiased
-   screen -> confirm rule for every arm.
+   counterfactual-test budget. Adoption uses the same rule for every arm
+   (HP "gate", chosen on FROZEN_META only): the screening winner among
+   candidates that solve no fewer screen probes than the incumbent; its
+   fresh confirmation probes are logged and used as training rows.
 
 Arms (identical code path, flags differ; identical execution cap):
   COLD                    no improvement
@@ -841,10 +847,12 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
                     "mu": round(c.mu, 5), "y_mean": round(sum(y) / len(y), 5),
                     "solved": tot(per)[0],
                     "x": [round(z, 4) for z in c.x]})
-            # ONE adoption gate for every arm (the solve-count gate the v2
-            # confirmatory battery used): a finalist must not solve fewer
-            # screen probes, must not solve fewer FRESH confirmation probes,
-            # and must be strictly better over the whole batch.
+            # ONE adoption gate for every arm. The finalist is the screening
+            # winner among candidates that solve no fewer screen probes than
+            # the incumbent; it is then run on FRESH confirmation probes.
+            # hp["gate"]: "strict" (v2 rule: no fewer confirm solves and
+            # strictly better overall), "noninferior", or "always" (adopt
+            # the finalist; the rule chosen on FROZEN_META only, dev-06).
             live = [t for t in results if tot(t[1])[0] >= tot(inc_s)[0]]
             if live:
                 if policy == "LEARN" and hp["finalist"] == "posterior":

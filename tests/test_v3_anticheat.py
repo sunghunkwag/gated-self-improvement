@@ -184,6 +184,12 @@ class TestMetaPredictor(unittest.TestCase):
         rows_last = sum(rd["n_rows"] for rd in b["worlds"][-1]["rounds"])
         self.assertEqual(b["model_n"], rows_last)
         self.assertGreater(a["model_n"], rows_last)
+        # the meta-controller's cost is counted over ALL worlds, including
+        # the predictors NOCARRY threw away
+        for r in (a, b):
+            self.assertEqual(r["meta_ops"]["rows"], sum(
+                rd["n_rows"] for wd in r["worlds"] for rd in wd["rounds"]))
+            self.assertEqual(r["meta_program_executions"], 0)
 
     def test_learning_rows_use_metaval_probes_only(self):
         """The only data a learning arm sees are paired outcomes on META-VAL
@@ -198,6 +204,34 @@ class TestMetaPredictor(unittest.TestCase):
                 arg = node.args[1]
                 self.assertTrue(isinstance(arg, ast.Name) and arg.id in (
                     "screen", "confirm", "probes"))
+
+
+class TestConfirmatoryDecisionRule(unittest.TestCase):
+    """The preregistered gatekeeping cannot be bypassed: no secondary
+    contrast is declared supported unless the primary is."""
+
+    def _comps(self, p1, p2, p3, m1=1.0):
+        return {"H1": {"role": "primary", "p": p1, "mean": m1},
+                "H2": {"role": "secondary", "p": p2, "mean": 1.0},
+                "H3": {"role": "secondary", "p": p3, "mean": 1.0}}
+
+    def test_secondaries_blocked_when_primary_fails(self):
+        c = R.gatekeeping(self._comps(0.2, 1e-5, 1e-5), 0.05)
+        self.assertFalse(c["H1"]["pass"])
+        self.assertFalse(c["H2"]["pass"] or c["H3"]["pass"])
+        self.assertFalse(c["H2"]["tested"])
+        c = R.gatekeeping(self._comps(0.001, 1e-5, 1e-5, m1=-1.0), 0.05)
+        self.assertFalse(c["H1"]["pass"] or c["H2"]["pass"])
+
+    def test_primary_full_alpha_secondaries_holm(self):
+        c = R.gatekeeping(self._comps(0.049, 0.03, 0.02), 0.05)
+        self.assertTrue(c["H1"]["pass"])
+        self.assertAlmostEqual(c["H3"]["p_adj"], 0.04)
+        self.assertAlmostEqual(c["H2"]["p_adj"], 0.04)
+        self.assertTrue(c["H2"]["pass"] and c["H3"]["pass"])
+        c = R.gatekeeping(self._comps(0.01, 0.03, 0.2), 0.05)
+        self.assertAlmostEqual(c["H2"]["p_adj"], 0.06)
+        self.assertFalse(c["H2"]["pass"])
 
 
 class TestDiagnosisAblation(unittest.TestCase):
