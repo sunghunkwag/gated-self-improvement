@@ -89,6 +89,7 @@ HP = {
     # learning arms to denoise the finalist choice)
     "noise_var": 0.055, "prior_var": 0.0015,
     "gate": "strict", "finalist": "measured",
+    "screen_n": 6, "confirm_n": 6,
 }
 
 N_STATE = 15
@@ -747,7 +748,6 @@ def rank(pool, policy, model, v, diag_on, inc_mean, nd, prng, k):
 def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
                   learn, log, model):
     state = State()
-    half = T.METAVAL_BATCH // 2
     for r in range(1, hp["n_rounds"] + 1):
         att = arm_meter.child(len(train) * hp["attempt_budget"], "attempt")
         comp = SV.Compiled(state.cfg)
@@ -769,7 +769,9 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
         rec["alloc"] = alloc
         rec["pool"] = [c.label for c in pool]
         batch = [(r, j, t) for j, t in enumerate(batches[r - 1])]
-        screen, confirm = batch[:half], batch[half:]
+        sn, cn = hp["screen_n"], hp["confirm_n"]
+        assert sn + cn <= len(batch)
+        screen, confirm = batch[:sn], batch[sn:sn + cn]
         try:
             inc_s = gate_eval(state.cfg, screen, seed, gate, hp)
             inc_c = gate_eval(state.cfg, confirm, seed, gate, hp)
@@ -858,7 +860,7 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
                         state.cfg = fin[0].cfg
         if inc_s is not None:
             state.inc_rates.append((tot(inc_s)[0] + tot(inc_c)[0])
-                                   / float(len(batch)))
+                                   / float(len(inc_s) + len(inc_c)))
         if learn and rows:
             for x, y in rows:
                 model.add(x, y)
