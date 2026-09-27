@@ -59,10 +59,13 @@ prereg = {
                 "evaluation": "identical for all arms: %d executions per "
                               "final-holdout task, stream keyed by (world, "
                               "split, task index) only" % E.EVAL_BUDGET},
-    "seeds": {"dev_iterate": "3001-3040", "dev_check": "3101-3200",
+    "seeds": {"dev_iterate": "3001-3040",
+              "dev_check": "3101-3200 spent (v3devcheck-01, NO_GO); "
+                           "3201-3300 reserved for the next go/no-go",
               "confirm": confirm,
               "never_used": "1-40, 101-200, 1001-1300 (v1/v2)"},
-    "arms": list(I.ARMS),
+    "arms": ["COLD", "SINGLE_COMPUTE_MATCHED", "FROZEN_META",
+             "ADAPTIVE_META", "ADAPTIVE_NOCARRY", "NODIAG_META"],
     "primary_metric": {
         "field": "ext", "split": E.PRIMARY_SPLIT,
         "definition": "per run: total number of FINAL-HOLDOUT tasks (24 per "
@@ -73,18 +76,32 @@ prereg = {
         {"name": "H1_adaptive_vs_frozen", "a": "ADAPTIVE_META",
          "b": "FROZEN_META", "role": "primary"},
         {"name": "H2_adaptive_vs_single", "a": "ADAPTIVE_META",
-         "b": "SINGLE_COMPUTE_MATCHED", "role": "secondary"}],
+         "b": "SINGLE_COMPUTE_MATCHED", "role": "secondary"},
+        {"name": "H3_adaptive_vs_nocarry", "a": "ADAPTIVE_META",
+         "b": "ADAPTIVE_NOCARRY", "role": "secondary"}],
     "statistics": {
         "test": "paired (by run seed) sign-flip permutation test, one-sided "
                 "H_a: mean(a - b) > 0, 20000 permutations from a fixed "
                 "deterministic stream",
-        "multiplicity": "Holm over H1 and H2", "alpha": 0.05,
-        "decision_rule": "supported iff mean(a - b) > 0 and Holm-adjusted "
+        "multiplicity": "fixed-sequence gatekeeping: H1 (primary) is "
+                        "tested alone at alpha; only if H1 is supported are "
+                        "H2 and H3 tested, Holm-adjusted between themselves "
+                        "at alpha (family-wise error <= alpha)",
+        "alpha": 0.05,
+        "decision_rule": "supported iff mean(a - b) > 0 and the adjusted "
                          "p < alpha; otherwise reported as null"},
+    "verification_checks": [
+        "per-world ADAPTIVE-FROZEN and ADAPTIVE-NOCARRY: second-half mean "
+        "vs first-half mean, with a paired test of the per-seed difference",
+        "rank validity: per-seed mean within-round Spearman(predicted, "
+        "realized cross-family META-VAL gain), worlds >= 2, one-sided > 0",
+        "meta-controller compute logged (rows/refits/predictions/flops/"
+        "seconds); zero program executions asserted",
+        "identical caps and per-world caps across arms; spent <= cap; "
+        "metered spend == global execution counter for every unit"],
     "exploratory_contrasts": [
-        ["ADAPTIVE_META", "ADAPTIVE_NOCARRY", "ext"],
         ["ADAPTIVE_META", "NODIAG_META", "ext"],
-        ["ADAPTIVE_META", "HEURISTIC_META", "ext"],
+        ["NODIAG_META", "FROZEN_META", "ext"],
         ["FROZEN_META", "SINGLE_COMPUTE_MATCHED", "ext"],
         ["ADAPTIVE_META", "FROZEN_META", "meta_quality"],
         ["ADAPTIVE_META", "FROZEN_META", "in"],
@@ -98,7 +115,8 @@ prereg = {
                               "runner produces the report whatever it says",
     "dev_history": "v3 ledger: every dev iteration, dev-check and note, "
                    "including the failed designs"}
-path = os.path.join(ROOT, "results", "PREREGISTRATION_V3.json")
+path = os.environ.get("RSI_V3_PREREG_OUT",
+                      os.path.join(ROOT, "results", "PREREGISTRATION_V3.json"))
 with open(path, "w", encoding="utf-8") as f:
     f.write(json.dumps(prereg, indent=1, sort_keys=True) + "\n")
 print("wrote", path, prereg["hp_sha"])

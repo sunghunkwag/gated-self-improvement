@@ -26,6 +26,9 @@ class Ridge(object):
         self.w = [0.0] * dim
         self.n = 0
         self.frozen = False
+        # meta-controller compute accounting (deterministic): the predictor
+        # never executes a program; its cost is floating-point arithmetic
+        self.ops = {"rows": 0, "refits": 0, "predictions": 0, "flops": 0}
 
     def add(self, x, y):
         if self.frozen:
@@ -38,14 +41,21 @@ class Ridge(object):
                 row[j] += vi * vj
             b[i] += vi * y
         self.n += 1
+        self.ops["rows"] += 1
+        self.ops["flops"] += 2 * len(nz) * len(nz) + 2 * len(nz)
 
     def refit(self):
         if self.frozen:
             return
         L = cholesky(self.A)
         self.w = chol_solve(L, self.b)
+        d = self.dim
+        self.ops["refits"] += 1
+        self.ops["flops"] += d * d * d // 3 + 2 * d * d
 
     def predict(self, x):
+        self.ops["predictions"] += 1
+        self.ops["flops"] += 2 * self.dim
         return sum(wi * xi for wi, xi in zip(self.w, x))
 
 

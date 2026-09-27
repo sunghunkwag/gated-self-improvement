@@ -3,7 +3,8 @@ rsi_v3.runner -- dev iterations, dev-check looks, preregistration freeze,
 confirmatory battery, report. Everything is appended to the v3 ledger.
 
   python3 -m rsi_v3 dev --label NAME --seeds 3001-3012 [--hp JSON]
-  python3 -m rsi_v3 devcheck --label NAME        # seeds 3101-3200, logged
+  python3 -m rsi_v3 devcheck --label NAME        # seeds 3201-3300, logged;
+                                                 # needs a fresh criterion
   python3 -m rsi_v3 freeze
   python3 -m rsi_v3 confirm [--workers 4]
   python3 -m rsi_v3 report
@@ -19,7 +20,7 @@ import time
 from rsi_v2 import substrate as S
 from rsi_v2 import selfgen as SG
 from rsi_v2 import stats as ST
-from rsi_v2.ledger import Ledger
+from .ledger import SafeLedger as Ledger
 from . import tasks as T
 from . import improver as I
 from . import evaluate as E
@@ -29,10 +30,16 @@ SRC = os.path.dirname(PKG)
 ROOT = os.path.dirname(SRC)
 LEDGER_PATH = os.path.join(ROOT, "results", "ledger", "rsi_v3_ledger.jsonl")
 PREREG_PATH = os.path.join(ROOT, "results", "PREREGISTRATION_V3.json")
-DEV_LOG = os.path.join(ROOT, "results", "logs", "v3_dev.jsonl")
-CONFIRM_LOG = os.path.join(ROOT, "results", "logs", "v3_confirm.jsonl")
+# compact per-unit summaries (plain JSONL, mirrored in the ledger) and the
+# FULL per-unit detail (gzip JSONL; its sha256 is in the summary/ledger)
+DEV_LOG = os.path.join(ROOT, "results", "logs", "v3_dev_units.jsonl")
+DEV_DETAIL = os.path.join(ROOT, "results", "logs", "v3_dev_detail.jsonl.gz")
+CONFIRM_LOG = os.path.join(ROOT, "results", "logs", "v3_confirm_units.jsonl")
+CONFIRM_DETAIL = os.path.join(ROOT, "results", "logs",
+                              "v3_confirm_detail.jsonl.gz")
 DEV_ITERATE = tuple(range(3001, 3041))
-DEV_CHECK = tuple(range(3101, 3201))
+DEV_CHECK_SPENT = tuple(range(3101, 3201))   # v3devcheck-01: NO_GO
+DEV_CHECK = tuple(range(3201, 3301))         # reserved for the next go/no-go
 FORBIDDEN = tuple(range(1, 41)) + tuple(range(101, 201)) + tuple(
     range(1001, 1301))
 EVALUATOR_FILES = ("rsi_v3/tasks.py", "rsi_v3/evaluate.py",
@@ -98,7 +105,11 @@ def run_unit(job):
            "train_solved": sum(x["train_solved"] for x in ws) / float(len(ws)),
            "n_macros": sum(x["n_macros"] for x in ws) / float(len(ws)),
            "worlds": ws, "model_w": rec["model_w"],
-           "model_n": rec["model_n"]}
+           "model_n": rec["model_n"], "meta_ops": rec["meta_ops"],
+           "meta_program_executions": rec["meta_program_executions"],
+           "meta_seconds": round(sum(rd.get("meta_seconds", 0.0)
+                                     for x in ws for rd in x["rounds"]), 3),
+           "rank_validity": rank_validity_unit(ws)}
     out.update(SG.self_score(cfgs[-1], seed))
     if arm == "COLD":
         out["replicate_ext"] = sum(rep)
@@ -121,8 +132,90 @@ def _append(path, rec):
     d = os.path.dirname(path)
     if not os.path.isdir(d):
         os.makedirs(d)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, sort_keys=True) + "\n")
+    line = json.dumps(rec, sort_keys=True) + "\n"
+    if path.endswith(".gz"):
+        import gzip
+        with gzip.open(path, "at", encoding="utf-8") as f:   # new member
+            f.write(line)
+    else:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+
+
+def compact(full):
+    """Summary kept in the ledger / plain log: every field the report and
+    the verification checks need, plus the sha256 binding the full detail
+    record (per-round pools, screened candidates, features) to the chain."""
+    out = {k: v for k, v in full.items() if k != "worlds"}
+    out["detail_sha"] = S.sha256_text(S.canon(full))
+    out["mq_w"] = meta_quality_by_world(full)
+    out["adopt_w"] = [sum(1 for rd in wd["rounds"] if rd.get("adopted"))
+                      for wd in full["worlds"]]
+    acts = {}
+    for wd in full["worlds"]:
+        for rd in wd["rounds"]:
+            a = rd.get("adopted_action")
+            if a:
+                acts[a] = acts.get(a, 0) + 1
+    out["adopted_actions"] = acts
+    out["final_cfg_shas"] = [wd["final_cfg_sha"] for wd in full["worlds"]]
+    out["macros_w"] = [wd["n_macros"] for wd in full["worlds"]]
+    return out
+
+
+def rank_validity_unit(worlds):
+    """Does the learned ranking predict REAL FUTURE cross-family gain? For
+    every round, the predictor's scores mu were computed BEFORE the screened
+    candidates were evaluated; y is their realized paired gain on fresh
+    META-VAL probes (families disjoint from the train families). Returns
+    per-world mean within-round rank correlation (Spearman) and the pooled
+    (mu, y) pairs' Pearson correlation."""
+    out = []
+    for wd in worlds:
+        rhos, pairs = [], []
+        for rd in wd["rounds"]:
+            sc = [(s["mu"], s["y_mean"]) for s in rd.get("screened", [])
+                  if "y_mean" in s]
+            pairs += sc
+            if len(sc) >= 3 and len({m for m, _y in sc}) > 1:
+                rho = _spearman([m for m, _y in sc], [y for _m, y in sc])
+                if rho is not None:
+                    rhos.append(rho)
+        out.append({"spearman_within_round": (sum(rhos) / len(rhos))
+                    if rhos else None,
+                    "pearson": _pearson([m for m, _y in pairs],
+                                        [y for _m, y in pairs])})
+    return out
+
+
+def _rank(v):
+    order = sorted(range(len(v)), key=lambda i: v[i])
+    r = [0.0] * len(v)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+            j += 1
+        for k in range(i, j + 1):
+            r[order[k]] = (i + j) / 2.0
+        i = j + 1
+    return r
+
+
+def _pearson(a, b):
+    n = len(a)
+    if n < 3:
+        return None
+    ma, mb = sum(a) / n, sum(b) / n
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    if va <= 0 or vb <= 0:
+        return None
+    return sum((x - ma) * (y - mb) for x, y in zip(a, b)) / (va * vb) ** 0.5
+
+
+def _spearman(a, b):
+    return _pearson(_rank(a), _rank(b))
 
 
 def meta_quality_by_world(r):
@@ -138,11 +231,12 @@ def meta_quality(r, first_world=2):
     """Mean realized paired gain (candidate - incumbent, cross-family
     META-VAL probes) of the candidates this arm chose to test, over worlds
     >= first_world: the direct measure of how well the improver picks
-    improvements once cross-world learning could have happened."""
-    ys = [s["y_mean"] for wd in r["worlds"][first_world - 1:]
-          for rd in wd["rounds"] for s in rd.get("screened", [])
-          if "y_mean" in s]
-    return sum(ys) / len(ys) if ys else None
+    improvements once cross-world learning could have happened. (Each
+    world screens the same number of candidates, so the mean of per-world
+    means equals the pooled mean.)"""
+    mq = r["mq_w"] if "mq_w" in r else meta_quality_by_world(r)
+    mq = mq[first_world - 1:]
+    return sum(mq) / len(mq) if mq else None
 
 
 def summarize(results, arms, seeds):
@@ -157,18 +251,17 @@ def summarize(results, arms, seeds):
         n = float(len(rs))
         mq = [meta_quality(r) for r in rs]
         mq = [x for x in mq if x is not None]
+        mqw = [r["mq_w"] for r in rs]
         summ[a] = {"n": len(rs), "ext": sum(r["ext"] for r in rs) / n,
                    "in": sum(r["in"] for r in rs) / n,
                    "train": sum(r["train_solved"] for r in rs) / n,
                    "macros": sum(r["n_macros"] for r in rs) / n,
                    "ext_w": [sum(r["ext_w"][w] for r in rs) / n
                              for w in range(len(rs[0]["ext_w"]))],
-                   "adopt": sum(sum(1 for wd in r["worlds"]
-                                    for rd in wd["rounds"]
-                                    if rd.get("adopted")) for r in rs) / n,
+                   "adopt": sum(sum(r["adopt_w"]) for r in rs) / n,
                    "meta_quality": (sum(mq) / len(mq)) if mq else None,
-                   "mq_w": [sum(meta_quality_by_world(r)[w] for r in rs) / n
-                            for w in range(len(rs[0]["worlds"]))],
+                   "mq_w": [sum(x[w] for x in mqw) / n
+                            for w in range(len(mqw[0]))],
                    "spent": sum(r["spent"] for r in rs) / n}
     con = {}
     for a, b in (("ADAPTIVE_META", "FROZEN_META"),
@@ -215,9 +308,16 @@ def _print(summ, con):
 
 def _dev_like(kind, label, seeds, hp_over, workers, arms, allowed):
     for s in seeds:
-        if s not in allowed or s in FORBIDDEN:
+        if s not in allowed or s in FORBIDDEN or s in DEV_CHECK_SPENT:
             sys.exit("seed %d not allowed for %s" % (s, kind))
     led = Ledger(LEDGER_PATH)
+    if kind == "DEVCHECK":
+        # a go/no-go look is only valid against a criterion written after
+        # the previous look (no re-using an old criterion after peeking)
+        crit = [r["seq"] for r in led.find("GO_NO_GO_CRITERION")]
+        last = [r["seq"] for r in led.find("DEVCHECK_END")]
+        if not crit or (last and max(crit) < max(last)):
+            sys.exit("record a new GO_NO_GO_CRITERION before this dev-check")
     if led.find("PREREG_FREEZE"):
         print("NOTE: protocol already frozen; this run cannot change it")
     hp = json.loads(json.dumps(I.HP))
@@ -229,8 +329,10 @@ def _dev_like(kind, label, seeds, hp_over, workers, arms, allowed):
 
     def on_result(r):
         r["phase"], r["label"] = kind, label
-        _append(DEV_LOG, r)
-        results.append(r)
+        _append(DEV_DETAIL, r)
+        c = compact(r)
+        _append(DEV_LOG, c)
+        results.append(c)
     _pool_map([(a, s, hp) for s in seeds for a in arms], workers, on_result)
     summ, con = summarize(results, arms, seeds)
     led.append(kind + "_END", {
@@ -265,7 +367,8 @@ def cmd_freeze():
         sys.exit("already frozen (freeze is one-shot)")
     prereg, sha = load_prereg()
     seeds = parse_seeds(prereg["seeds"]["confirm"])
-    bad = set(seeds) & (set(FORBIDDEN) | set(DEV_ITERATE) | set(DEV_CHECK))
+    bad = set(seeds) & (set(FORBIDDEN) | set(DEV_ITERATE) | set(DEV_CHECK)
+                        | set(DEV_CHECK_SPENT))
     if bad:
         sys.exit("confirm seeds overlap forbidden/dev seeds: %s"
                  % sorted(bad)[:5])
@@ -312,8 +415,10 @@ def cmd_confirm(workers):
 
     def on_result(r):
         r["phase"] = "confirm"
-        _append(CONFIRM_LOG, r)
-        led.append("UNIT_END", r)
+        _append(CONFIRM_DETAIL, r)
+        c = compact(r)
+        _append(CONFIRM_LOG, c)
+        led.append("UNIT_END", c)
         print("  %-24s seed %d ext %2d [%.0fs]" % (r["arm"], r["seed"],
                                                    r["ext"],
                                                    time.time() - t0),
@@ -327,6 +432,27 @@ def collect(led, phase, arms, seeds):
         tab[(r["body"]["arm"], r["body"]["seed"])] = r["body"]
     missing = [(a, s) for s in seeds for a in arms if (a, s) not in tab]
     return tab, missing
+
+
+def gatekeeping(comps, alpha):
+    """Preregistered fixed-sequence gatekeeping, in place. The primary
+    contrast is tested alone at alpha; only if it is supported are the
+    secondary contrasts tested, Holm-adjusted among themselves at alpha.
+    Family-wise error <= alpha over all confirmatory contrasts."""
+    prim = [k for k in comps if comps[k]["role"] == "primary"]
+    assert len(prim) == 1
+    prim = prim[0]
+    comps[prim]["p_adj"] = comps[prim]["p"]
+    comps[prim]["pass"] = bool(comps[prim]["mean"] > 0
+                               and comps[prim]["p"] < alpha)
+    sec = {k: comps[k]["p"] for k in comps if k != prim}
+    adj = ST.holm(sec) if sec else {}
+    for k in sec:
+        comps[k]["p_adj"] = adj[k]
+        comps[k]["tested"] = comps[prim]["pass"]
+        comps[k]["pass"] = bool(comps[prim]["pass"] and comps[k]["mean"] > 0
+                                and adj[k] < alpha)
+    return comps
 
 
 def build_report(led):
@@ -345,18 +471,14 @@ def build_report(led):
     assert metric == "ext" and prereg["primary_metric"]["split"] == \
         E.PRIMARY_SPLIT, "primary metric must be the FINAL external holdout"
     alpha = prereg["statistics"]["alpha"]
-    comps, pvals = {}, {}
+    comps = {}
     for c in prereg["confirmatory_contrasts"]:
         d = [tab[(c["a"], s)][metric] - tab[(c["b"], s)][metric]
              for s in seeds]
         sm = ST.summary(d, "v3confirm|%s-%s" % (c["a"], c["b"]),
                         one_sided=True)
         comps[c["name"]] = dict(sm, a=c["a"], b=c["b"], role=c["role"])
-        pvals[c["name"]] = sm["p"]
-    adj = ST.holm(pvals)
-    for k in comps:
-        comps[k]["p_holm"] = adj[k]
-        comps[k]["pass"] = bool(comps[k]["mean"] > 0 and adj[k] < alpha)
+    gatekeeping(comps, alpha)
     rep["confirmatory"] = comps
     expl = {}
     for a, b, field in prereg["exploratory_contrasts"]:
@@ -376,10 +498,78 @@ def build_report(led):
                               "spent", "self_solved")} for a in arms}
     rep["caps"] = {a: sorted({tab[(a, s)]["cap"] for s in seeds})
                    for a in arms}
+    rep["verification"] = verification(tab, seeds, arms)
     prim = [c for c in comps.values() if c["role"] == "primary"][0]
     rep["verdict"] = ("PRIMARY PASSED" if prim["pass"]
                       else "PRIMARY NOT SUPPORTED (null)")
     return rep
+
+
+def verification(tab, seeds, arms):
+    """Pre-registered verification checks reported with the verdict."""
+    v = {}
+    W = len(tab[(arms[0], seeds[0])]["ext_w"])
+    # 1. the advantage persists / grows across later worlds
+    for b in ("FROZEN_META", "ADAPTIVE_NOCARRY"):
+        if b not in arms:
+            continue
+        per_w = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
+                     - tab[(b, s)]["ext_w"][w] for s in seeds)
+                 / float(len(seeds)) for w in range(W)]
+        trend = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
+                     - tab[(b, s)]["ext_w"][w] for w in range(W // 2, W))
+                 - sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
+                       - tab[(b, s)]["ext_w"][w] for w in range(W // 2))
+                 for s in seeds]
+        sm = ST.summary(trend, "v3verif|trend|%s" % b)
+        v["per_world_ADAPTIVE_minus_%s" % b] = {
+            "per_world": [round(x, 4) for x in per_w],
+            "first_half": sum(per_w[:W // 2]) / (W // 2),
+            "second_half": sum(per_w[W // 2:]) / (W - W // 2),
+            "second_minus_first_per_seed": sm}
+    # 2. the learned ranking predicts REAL FUTURE cross-family gain
+    rho = []
+    for s in seeds:
+        xs = [w["spearman_within_round"] for w in
+              tab[("ADAPTIVE_META", s)]["rank_validity"][1:]
+              if w["spearman_within_round"] is not None]
+        if xs:
+            rho.append(sum(xs) / len(xs))
+    v["rank_validity_ADAPTIVE"] = dict(
+        ST.summary(rho, "v3verif|rho", one_sided=True),
+        note="per-seed mean within-round Spearman between the predictor's "
+             "score (computed BEFORE evaluation) and the realized paired "
+             "gain on fresh cross-family META-VAL probes, worlds >= 2")
+    v["rank_validity_by_world"] = [
+        (lambda xs: sum(xs) / len(xs) if xs else None)(
+            [tab[("ADAPTIVE_META", s)]["rank_validity"][w]
+             ["spearman_within_round"] for s in seeds
+             if tab[("ADAPTIVE_META", s)]["rank_validity"][w]
+             ["spearman_within_round"] is not None]) for w in range(W)]
+    # 3. meta-controller compute is logged and uses no program executions
+    mc = {}
+    for a in arms:
+        ops = [tab[(a, s)].get("meta_ops") for s in seeds]
+        if ops and ops[0]:
+            mc[a] = {k: sum(o[k] for o in ops) / float(len(ops))
+                     for k in ops[0]}
+            mc[a]["seconds"] = sum(tab[(a, s)].get("meta_seconds", 0.0)
+                                   for s in seeds) / float(len(seeds))
+        assert all(tab[(a, s)].get("meta_program_executions", 0) == 0
+                   for s in seeds)
+    v["meta_controller_compute_mean_per_run"] = mc
+    v["meta_controller_program_executions"] = 0
+    # 4. identical compute conditions, exact metering
+    v["caps_identical"] = len({tab[(a, s)]["cap"] for a in arms
+                               for s in seeds}) == 1
+    v["world_caps_identical"] = len({tab[(a, s)]["world_cap"] for a in arms
+                                     for s in seeds}) == 1
+    v["all_within_cap"] = all(tab[(a, s)]["spent"] <= tab[(a, s)]["cap"]
+                              for a in arms for s in seeds)
+    v["all_metered_exactly"] = all(tab[(a, s)]["spent"]
+                                   == tab[(a, s)]["global_delta"]
+                                   for a in arms for s in seeds)
+    return v
 
 
 def cmd_report(out):
@@ -430,7 +620,7 @@ def main(argv=None):
         _dev_like("DEV", a.label, parse_seeds(a.seeds or "3001-3012"),
                   json.loads(a.hp), a.workers, a.arms.split(","), DEV_ITERATE)
     elif a.cmd == "devcheck":
-        _dev_like("DEVCHECK", a.label, parse_seeds(a.seeds or "3101-3200"),
+        _dev_like("DEVCHECK", a.label, parse_seeds(a.seeds or "3201-3300"),
                   json.loads(a.hp), a.workers, a.arms.split(","), DEV_CHECK)
     elif a.cmd == "freeze":
         cmd_freeze()

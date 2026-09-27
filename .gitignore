@@ -9,3 +9,4 @@ ladder_cache.json
 ladder_checkpoint.json
 .DS_Store
 *.tmp
+results/ledger/*.lock

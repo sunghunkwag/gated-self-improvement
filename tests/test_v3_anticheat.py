@@ -26,7 +26,7 @@ sys.path.insert(0, SRC)
 
 from rsi_v2 import substrate as S               # noqa: E402
 from rsi_v2 import solver as SV                 # noqa: E402
-from rsi_v2.ledger import Ledger                # noqa: E402
+from rsi_v3.ledger import SafeLedger as Ledger  # noqa: E402
 from rsi_v3 import tasks as T                   # noqa: E402
 from rsi_v3 import improver as I                # noqa: E402
 from rsi_v3 import evaluate as E                # noqa: E402
@@ -97,7 +97,8 @@ class TestCRNV3(unittest.TestCase):
         b = I.run_arm("ADAPTIVE_META", SEED, TINY)[1]
         ra, rb = a["worlds"][0]["rounds"][0], b["worlds"][0]["rounds"][0]
         strip = lambda r: json.dumps(
-            {k: v for k, v in r.items() if k not in ("model_n", "n_rows")},
+            {k: v for k, v in r.items()
+             if k not in ("model_n", "n_rows", "meta_seconds")},
             sort_keys=True)
         self.assertEqual(strip(ra), strip(rb))
 
@@ -183,6 +184,12 @@ class TestMetaPredictor(unittest.TestCase):
         rows_last = sum(rd["n_rows"] for rd in b["worlds"][-1]["rounds"])
         self.assertEqual(b["model_n"], rows_last)
         self.assertGreater(a["model_n"], rows_last)
+        # the meta-controller's cost is counted over ALL worlds, including
+        # the predictors NOCARRY threw away
+        for r in (a, b):
+            self.assertEqual(r["meta_ops"]["rows"], sum(
+                rd["n_rows"] for wd in r["worlds"] for rd in wd["rounds"]))
+            self.assertEqual(r["meta_program_executions"], 0)
 
     def test_learning_rows_use_metaval_probes_only(self):
         """The only data a learning arm sees are paired outcomes on META-VAL
@@ -199,30 +206,70 @@ class TestMetaPredictor(unittest.TestCase):
                     "screen", "confirm", "probes"))
 
 
+class TestConfirmatoryDecisionRule(unittest.TestCase):
+    """The preregistered gatekeeping cannot be bypassed: no secondary
+    contrast is declared supported unless the primary is."""
+
+    def _comps(self, p1, p2, p3, m1=1.0):
+        return {"H1": {"role": "primary", "p": p1, "mean": m1},
+                "H2": {"role": "secondary", "p": p2, "mean": 1.0},
+                "H3": {"role": "secondary", "p": p3, "mean": 1.0}}
+
+    def test_secondaries_blocked_when_primary_fails(self):
+        c = R.gatekeeping(self._comps(0.2, 1e-5, 1e-5), 0.05)
+        self.assertFalse(c["H1"]["pass"])
+        self.assertFalse(c["H2"]["pass"] or c["H3"]["pass"])
+        self.assertFalse(c["H2"]["tested"])
+        c = R.gatekeeping(self._comps(0.001, 1e-5, 1e-5, m1=-1.0), 0.05)
+        self.assertFalse(c["H1"]["pass"] or c["H2"]["pass"])
+
+    def test_primary_full_alpha_secondaries_holm(self):
+        c = R.gatekeeping(self._comps(0.049, 0.03, 0.02), 0.05)
+        self.assertTrue(c["H1"]["pass"])
+        self.assertAlmostEqual(c["H3"]["p_adj"], 0.04)
+        self.assertAlmostEqual(c["H2"]["p_adj"], 0.04)
+        self.assertTrue(c["H2"]["pass"] and c["H3"]["pass"])
+        c = R.gatekeeping(self._comps(0.01, 0.03, 0.2), 0.05)
+        self.assertAlmostEqual(c["H2"]["p_adj"], 0.06)
+        self.assertFalse(c["H2"]["pass"])
+
+
 class TestDiagnosisAblation(unittest.TestCase):
     def test_diagnosis_changes_generated_candidates(self):
         """Mechanical proof: with the diagnosis switched off, the same
         state produces a different candidate pool (allocation differs),
         on most first rounds across seeds."""
-        differ = 0
-        seeds = (3001, 3002, 3003, 3004)
-        for sd in seeds:
-            key = I.world_key(sd, 1)
-            train, _b = T.improver_view(key, 1)
-            st = I.State()
-            m = S.Meter(10 ** 12)
-            comp = SV.Compiled(st.cfg)
-            traces = [I.attempt(st, comp, t, i, 300,
-                                I.stream(key, "attempt", 1, i), m)
-                      for i, t in enumerate(train)]
-            v, _vd, info = I.diagnose(st, traces, 1, TINY)
-            p1, a1, _ = I.generate_pool(st, traces, train, v, info, m, TINY,
-                                        True, 24)
-            p2, a2, _ = I.generate_pool(st, traces, train, v, info, m, TINY,
-                                        False, 24)
-            if [c.label for c in p1] != [c.label for c in p2]:
-                differ += 1
-        self.assertGreaterEqual(differ, 3)
+        hp = I.HP        # the real (frozen-candidate) configuration
+        differ, n = 0, 0
+        for sd in (3001, 3002, 3003, 3004):
+            for w in (1, 2):
+                key = I.world_key(sd, w)
+                train, _b = T.improver_view(key, 1)
+                st = I.State()
+                m = S.Meter(10 ** 12)
+                comp = SV.Compiled(st.cfg)
+                traces = [I.attempt(st, comp, t, i, hp["attempt_budget"],
+                                    I.stream(key, "attempt", 1, i), m)
+                          for i, t in enumerate(train)]
+                v, _vd, info = I.diagnose(st, traces, 1, hp)
+                p1, _a1, _ = I.generate_pool(st, traces, train, v, info, m,
+                                             hp, True, hp["pool_size"])
+                p2, _a2, _ = I.generate_pool(st, traces, train, v, info, m,
+                                             hp, False, hp["pool_size"])
+                n += 1
+                differ += [c.label for c in p1] != [c.label for c in p2]
+        self.assertGreaterEqual(differ, 6)      # >= 75% of real states
+
+    def test_diagnosis_enters_the_predictor(self):
+        """Ranking channel: the matched failure-score features are non-zero
+        with diagnosis and exactly zero in the NODIAG ablation."""
+        c = I.Cand("MINE", "MINE[0]", SV.base_config(), [0.0] * I.N_DELTA,
+                   1.0)
+        v = [0.7] * I.N_STATE
+        on = I.features(c, v, True, 0.0)
+        off = I.features(c, v, False, 0.0)
+        self.assertNotEqual(on, off)
+        self.assertEqual(len(on), I.feat_dim())
 
     def test_pruning_requires_evidence(self):
         st = I.State()
@@ -244,12 +291,37 @@ class TestProtocolV3(unittest.TestCase):
         self.assertFalse(set(R.DEV_ITERATE) & set(R.FORBIDDEN))
         self.assertFalse(set(R.DEV_CHECK) & set(R.FORBIDDEN))
         self.assertFalse(set(R.DEV_ITERATE) & set(R.DEV_CHECK))
+        self.assertFalse(set(R.DEV_CHECK_SPENT) & (
+            set(R.DEV_CHECK) | set(R.DEV_ITERATE) | set(R.FORBIDDEN)))
         for s in range(1001, 1301):
             self.assertIn(s, R.FORBIDDEN)
         led = Ledger(R.LEDGER_PATH)
         for r in led.records:
             for s in r["body"].get("seeds", []) or []:
                 self.assertNotIn(s, R.FORBIDDEN)
+
+    def test_devcheck_needs_fresh_criterion_and_unspent_seeds(self):
+        d = tempfile.mkdtemp()
+        orig = R.LEDGER_PATH
+        R.LEDGER_PATH = os.path.join(d, "l.jsonl")
+        try:
+            led = Ledger(R.LEDGER_PATH)
+            led.append("GENESIS", {})
+            with self.assertRaises(SystemExit):     # no criterion at all
+                R._dev_like("DEVCHECK", "t", [3201], {}, 1, ["COLD"],
+                            R.DEV_CHECK)
+            led.append("GO_NO_GO_CRITERION", {})
+            led.append("DEVCHECK_END", {"label": "old"})
+            with self.assertRaises(SystemExit):     # criterion is stale
+                R._dev_like("DEVCHECK", "t", [3201], {}, 1, ["COLD"],
+                            R.DEV_CHECK)
+            with self.assertRaises(SystemExit):     # spent go/no-go seeds
+                R._dev_like("DEVCHECK", "t", [3150], {}, 1, ["COLD"],
+                            R.DEV_CHECK + R.DEV_CHECK_SPENT)
+            self.assertEqual(len(Ledger(R.LEDGER_PATH).records), 3)
+        finally:
+            R.LEDGER_PATH = orig
+            shutil.rmtree(d)
 
     def test_dev_runs_refuse_forbidden_seeds(self):
         with self.assertRaises(SystemExit):
@@ -277,12 +349,35 @@ class TestProtocolV3(unittest.TestCase):
         self.assertEqual(p["statistics"]["alpha"], 0.05)
         seeds = R.parse_seeds(p["seeds"]["confirm"])
         self.assertFalse(set(seeds) & (set(R.FORBIDDEN) | set(R.DEV_ITERATE)
-                                       | set(R.DEV_CHECK)))
+                                       | set(R.DEV_CHECK)
+                                       | set(R.DEV_CHECK_SPENT)))
         fz = led.find("PREREG_FREEZE")[0]["seq"]
         for r in led.records:
             if r["kind"] in ("UNIT_START", "UNIT_END") and \
                     r["body"].get("phase") == "confirm":
                 self.assertGreater(r["seq"], fz)
+
+
+class TestLedgerConcurrency(unittest.TestCase):
+    def test_stale_writer_cannot_fork_the_chain(self):
+        """Reproduces the dev-11 race: a writer holding a stale copy
+        appends after another writer. SafeLedger must re-chain on top of
+        the true head, keeping the file verifiable."""
+        d = tempfile.mkdtemp()
+        try:
+            p = os.path.join(d, "l.jsonl")
+            a = Ledger(p)
+            a.append("X", {"i": 0})
+            stale = Ledger(p)
+            a.append("X", {"i": 1})
+            a.append("X", {"i": 2})
+            stale.append("X", {"i": 3})    # stale in-memory head
+            fresh = Ledger(p)
+            self.assertTrue(fresh.verify())
+            self.assertEqual([r["body"]["i"] for r in fresh.records],
+                             [0, 1, 2, 3])
+        finally:
+            shutil.rmtree(d)
 
 
 class TestDeterminismV3(unittest.TestCase):

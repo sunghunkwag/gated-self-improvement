@@ -7,12 +7,16 @@ mode, a Q-table that never ranked differently from its context-free
 ablation, and a probe reward drawn from TRAIN families while the final
 objective was cross-family. v3 changes the learning problem itself:
 
-1. SHARED CONTINUOUS CONTEXTUAL PREDICTOR (metamodel.Ridge). Features are
-   the full continuous diagnosis vector (all failure scores, search
-   progress, diversity, entropy, dead-macro ratio, composition depth...),
-   the candidate's action, and the candidate's concrete deltas (macros
-   added/removed, their length/support/depth/residual coverage, prior
-   shift, exploration change), with action x diagnosis interactions.
+1. SHARED CONTINUOUS CONTEXTUAL PREDICTOR (metamodel.Ridge), one model for
+   every action. The diagnosis is a continuous 15-dim vector (all failure
+   scores, search progress, diversity, entropy, dead-macro ratio,
+   composition depth, ...). Predictor features: the candidate's action,
+   its concrete deltas (macros added/removed, their length/support/depth/
+   residual coverage, prior shift, exploration change), the generator's
+   preference, action x its matched failure score, and the incumbent's
+   progress on the probe. (The full action x diagnosis block was tried
+   and overfit in leave-seeds-out CV on dev data -- ledger DEV_NOTE
+   diagnosis-after-dev08 -- so the compact form is used.)
 2. DENSE PAIRED TRAINING DATA: every (candidate, probe) pair of every
    counterfactual test is one row, y = progress(candidate) -
    progress(incumbent) on the same stream (progress = 1 if solved, else
@@ -33,8 +37,10 @@ objective was cross-family. v3 changes the learning problem itself:
      PRUNE    removal of dead macros -- generated ONLY when the evidence
               says the vocabulary is over-specialised
 5. The predictor RANKS the pool; only k candidates get the scarce
-   counterfactual-test budget. Adoption uses the same unbiased
-   screen -> confirm rule for every arm.
+   counterfactual-test budget. Adoption uses the same rule for every arm
+   (HP "gate", chosen on FROZEN_META only): the screening winner among
+   candidates that solve no fewer screen probes than the incumbent; its
+   fresh confirmation probes are logged and used as training rows.
 
 Arms (identical code path, flags differ; identical execution cap):
   COLD                    no improvement
@@ -50,6 +56,7 @@ Arms (identical code path, flags differ; identical execution cap):
                           preference x diagnosed need)
 """
 import math
+import time
 
 from rsi_v2 import substrate as S
 from rsi_v2 import solver as SV
@@ -68,9 +75,9 @@ CARRY_ARMS = ("ADAPTIVE_META", "NODIAG_META")   # predictor persists across
                                                 # worlds; NOCARRY resets it
 
 HP = {
-    "n_worlds": 4,
+    "n_worlds": 10,
     "n_rounds": 5,
-    "attempt_budget": 2000,
+    "attempt_budget": 1000,
     "gate_probe_budget": 600,
     "gate_round_budget": 48000,
     "k_screen": 8,
@@ -88,8 +95,9 @@ HP = {
     # estimated on dev seeds from split-half reliability (used only by
     # learning arms to denoise the finalist choice)
     "noise_var": 0.055, "prior_var": 0.0015,
-    "gate": "strict", "finalist": "measured",
-    "screen_n": 6, "confirm_n": 6,
+    # adoption gate chosen on FROZEN_META only (strongest control on dev)
+    "gate": "always", "finalist": "measured",
+    "screen_n": 6, "confirm_n": 6, "diag_params": False,
 }
 
 N_STATE = 15
@@ -540,17 +548,29 @@ def allocate(v, ok, size, diag_on, hp):
 def severity(v, diag_on):
     """Per-action failure severity in [0, 1] that PARAMETERISES the
     proposals (bundle vs single operators, prior step size, flattening).
-    Without diagnosis every action gets the neutral 0.5."""
+    Without diagnosis every action gets the neutral 0.5. Used only when
+    hp["diag_params"] is on (dev-11); the go/no-go / frozen configuration
+    (dev-10) keeps fixed proposal parameters and lets the diagnosis act
+    through allocation, evidence-gated pruning and the predictor."""
     if not diag_on:
         return {a: 0.5 for a in ACTIONS}
     return {a: max(0.0, min(1.0, v[MATCHED[a]])) for a in ACTIONS}
+
+
+FIXED_PRIOR = (("PRIOR[sol0.4]", "sol", 0.4), ("PRIOR[sol0.2]", "sol", 0.2),
+               ("PRIOR[near0.3]", "near", 0.3), ("PRIOR[sol0.7]", "sol", 0.7),
+               ("PRIOR[sol+near]", "both", 0.4))
+FIXED_EXPLORE = (("EXPLORE[0.3]", 0.3, 0), ("EXPLORE[depth+1]", 0.0, 1),
+                 ("EXPLORE[0.15]", 0.15, 0), ("EXPLORE[0.5]", 0.5, 0),
+                 ("EXPLORE[0.3+depth]", 0.3, 1))
 
 
 def generate_pool(state, traces, train, v, info, meter, hp, diag_on, size):
     ok = availability(state, traces, diag_on, info, hp)
     alloc = allocate(v, ok, size, diag_on, hp)
     nd = needs(v)
-    sev = severity(v, diag_on)
+    sev = severity(v, diag_on) if hp["diag_params"] else {
+        a: 0.5 for a in ACTIONS}
     raw = {}
     for a in ACTIONS:
         n = alloc.get(a, 0)
@@ -572,6 +592,13 @@ def generate_pool(state, traces, train, v, info, meter, hp, diag_on, size):
                   and t.best_prog is not None
                   and t.best_fit >= hp["near_miss_fit"]]
             lam = round(0.2 + 0.5 * sev[a], 3)    # worse ordering -> bigger
+            if not hp["diag_params"]:
+                src = {"sol": sp, "near": nm, "both": sp + nm}
+                opts = [(lb, refit(state.cfg, src[k], lm, hp))
+                        for lb, k, lm in FIXED_PRIOR]
+                raw[a] = [(lb, c, []) for lb, c in opts
+                          if c is not None][:n]
+                continue
             opts = [("PRIOR[sol%.2f]" % lam, refit(state.cfg, sp, lam, hp)),
                     ("PRIOR[sol%.2f]" % (lam / 2),
                      refit(state.cfg, sp, lam / 2, hp)),
@@ -583,6 +610,10 @@ def generate_pool(state, traces, train, v, info, meter, hp, diag_on, size):
             raw[a] = [(lb, c, []) for lb, c in opts if c is not None][:n]
         elif a == "EXPLORE":
             eps = round(0.1 + 0.4 * sev[a], 3)    # less traction -> flatter
+            if not hp["diag_params"]:
+                raw[a] = [(lb, explore_cfg(state.cfg, e, dp, hp), [])
+                          for lb, e, dp in FIXED_EXPLORE][:n]
+                continue
             opts = [("EXPLORE[%.2f]" % eps, explore_cfg(state.cfg, eps, 0,
                                                         hp)),
                     ("EXPLORE[depth+1]", explore_cfg(state.cfg, 0.0, 1, hp)),
@@ -792,8 +823,10 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
                                     zip(per, inc_s)), i))
                 picks = [i for _y, i in sorted(ys)][:hp["k_screen"]]
             else:
+                t_meta = time.perf_counter()
                 picks = rank(pool, policy, model, v, diag_on, inc_mean, nd,
                              stream(seed, "select", r), hp["k_screen"])
+                rec["meta_seconds"] = round(time.perf_counter() - t_meta, 4)
             for i in picks:
                 c = pool[i]
                 if c.x is None:
@@ -814,10 +847,12 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
                     "mu": round(c.mu, 5), "y_mean": round(sum(y) / len(y), 5),
                     "solved": tot(per)[0],
                     "x": [round(z, 4) for z in c.x]})
-            # ONE adoption gate for every arm (the solve-count gate the v2
-            # confirmatory battery used): a finalist must not solve fewer
-            # screen probes, must not solve fewer FRESH confirmation probes,
-            # and must be strictly better over the whole batch.
+            # ONE adoption gate for every arm. The finalist is the screening
+            # winner among candidates that solve no fewer screen probes than
+            # the incumbent; it is then run on FRESH confirmation probes.
+            # hp["gate"]: "strict" (v2 rule: no fewer confirm solves and
+            # strictly better overall), "noninferior", or "always" (adopt
+            # the finalist; the rule chosen on FROZEN_META only, dev-06).
             live = [t for t in results if tot(t[1])[0] >= tot(inc_s)[0]]
             if live:
                 if policy == "LEARN" and hp["finalist"] == "posterior":
@@ -862,9 +897,12 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
             state.inc_rates.append((tot(inc_s)[0] + tot(inc_c)[0])
                                    / float(len(inc_s) + len(inc_c)))
         if learn and rows:
+            t_meta = time.perf_counter()
             for x, y in rows:
                 model.add(x, y)
             model.refit()
+            rec["meta_seconds"] = round(rec.get("meta_seconds", 0.0)
+                                        + time.perf_counter() - t_meta, 4)
         rec["n_rows"] = len(rows)
         rec["model_n"] = model.n
         rec["n_macros"] = len(state.cfg.macros)
@@ -960,6 +998,7 @@ def run_arm(arm, seed, hp=None):
     g0 = S.EXEC.n
     cfgs, worlds = [], []
     model = None
+    ops_done = {"rows": 0, "refits": 0, "predictions": 0, "flops": 0}
     if arm not in ("COLD", "SINGLE_COMPUTE_MATCHED"):
         model = Ridge(feat_dim(), hp["ridge_lam"])
         model.frozen = arm not in LEARNING_ARMS
@@ -974,6 +1013,9 @@ def run_arm(arm, seed, hp=None):
             state = run_single(wseed, train, batches, wm, hp, log)
         else:
             if arm == "ADAPTIVE_NOCARRY":
+                if w > 1:        # keep the reset predictor's cost counted
+                    for k in model.ops:
+                        ops_done[k] += model.ops[k]
                 model = Ridge(feat_dim(), hp["ridge_lam"])
             policy = {"FROZEN_META": "FROZEN", "ADAPTIVE_META": "LEARN",
                       "NODIAG_META": "LEARN", "HEURISTIC_META": "HEURISTIC",
@@ -998,4 +1040,9 @@ def run_arm(arm, seed, hp=None):
         "arm": arm, "seed": seed, "cap": cap, "world_cap": wcap,
         "spent": arm_meter.spent, "global_delta": delta, "worlds": worlds,
         "model_w": [round(x, 6) for x in model.w] if model else None,
-        "model_n": model.n if model else 0}
+        "model_n": model.n if model else 0,
+        # meta-controller compute: zero program executions (every execution
+        # is metered above); its own cost is arithmetic, counted here
+        "meta_ops": {k: ops_done[k] + model.ops[k] for k in model.ops}
+        if model else None,
+        "meta_program_executions": 0}
