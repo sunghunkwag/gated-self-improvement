@@ -159,6 +159,7 @@ repaired by preserving the orphan verbatim (`results/ledger/rsi_v3_ledger.orphan
 (exclusive OS lock + re-read + re-verify before every append) is used from then on, and a test
 (`test_stale_writer_cannot_fork_the_chain`) reproduces the stale-writer race. `rsi_v2.ledger` is unchanged
 (it is hashed into the frozen v2 protocol).
+
 ## 5. The go/no-go look (seeds 3101–3200)
 
 **Pre-registration.** The criterion (ledger `GO_NO_GO_CRITERION`, seq 32) and the rule for choosing the
@@ -220,8 +221,8 @@ round is identical to FROZEN (tested). The ADAPTIVE − FROZEN world-1 gap comes
 | no final-holdout leakage | the FINAL rows are sealed at runtime while any improver runs, and are absent from the improver's view; learning rows come only from META-VAL probes; the improver has no code path to the final holdout (AST). All tested |
 
 **Spend vs cap.** Every arm has the same cap. The recursive arms spend 3.58–3.59 M of 4.4 M; SINGLE spends 3.22 M,
-because its attempts stop once the tasks are solved. That is a property of the arm, not a hidden advantage, but
-SINGLE could not have used more compute.
+because its attempts stop once the tasks are solved. The unspent part of SINGLE's cap is budget its design did not
+use, not budget it was denied.
 
 ## 6. Why this is NO_GO and not a confirmatory run
 
