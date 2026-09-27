@@ -17,6 +17,9 @@ deterministic.
 Two arms run the same loop; one may admit self-discovered building blocks (GATED), one may not (FROZEN). The gap
 is the evidence.
 
+- **v3 (pre-registered go/no-go, n = 100):** a meta-learned improver beats its frozen twin by +1.35 of 240
+  unseen-family tasks (p = 0.023), and its learned ranking predicts realized gain. The cross-problem carry-over
+  missed its bar, so the verdict was **NO_GO**: confirmatory seeds untouched, result unconfirmed.
 - **v2 (preregistered, n = 300, identical compute, unseen task families):** recursive self-improvement beats
   one-shot improvement with 5× compute by +0.40 tasks (Holm p = 0.0098). Adapting the improvement policy itself
   is a null (−0.08).

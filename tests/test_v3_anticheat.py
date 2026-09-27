@@ -291,12 +291,37 @@ class TestProtocolV3(unittest.TestCase):
         self.assertFalse(set(R.DEV_ITERATE) & set(R.FORBIDDEN))
         self.assertFalse(set(R.DEV_CHECK) & set(R.FORBIDDEN))
         self.assertFalse(set(R.DEV_ITERATE) & set(R.DEV_CHECK))
+        self.assertFalse(set(R.DEV_CHECK_SPENT) & (
+            set(R.DEV_CHECK) | set(R.DEV_ITERATE) | set(R.FORBIDDEN)))
         for s in range(1001, 1301):
             self.assertIn(s, R.FORBIDDEN)
         led = Ledger(R.LEDGER_PATH)
         for r in led.records:
             for s in r["body"].get("seeds", []) or []:
                 self.assertNotIn(s, R.FORBIDDEN)
+
+    def test_devcheck_needs_fresh_criterion_and_unspent_seeds(self):
+        d = tempfile.mkdtemp()
+        orig = R.LEDGER_PATH
+        R.LEDGER_PATH = os.path.join(d, "l.jsonl")
+        try:
+            led = Ledger(R.LEDGER_PATH)
+            led.append("GENESIS", {})
+            with self.assertRaises(SystemExit):     # no criterion at all
+                R._dev_like("DEVCHECK", "t", [3201], {}, 1, ["COLD"],
+                            R.DEV_CHECK)
+            led.append("GO_NO_GO_CRITERION", {})
+            led.append("DEVCHECK_END", {"label": "old"})
+            with self.assertRaises(SystemExit):     # criterion is stale
+                R._dev_like("DEVCHECK", "t", [3201], {}, 1, ["COLD"],
+                            R.DEV_CHECK)
+            with self.assertRaises(SystemExit):     # spent go/no-go seeds
+                R._dev_like("DEVCHECK", "t", [3150], {}, 1, ["COLD"],
+                            R.DEV_CHECK + R.DEV_CHECK_SPENT)
+            self.assertEqual(len(Ledger(R.LEDGER_PATH).records), 3)
+        finally:
+            R.LEDGER_PATH = orig
+            shutil.rmtree(d)
 
     def test_dev_runs_refuse_forbidden_seeds(self):
         with self.assertRaises(SystemExit):
@@ -324,7 +349,8 @@ class TestProtocolV3(unittest.TestCase):
         self.assertEqual(p["statistics"]["alpha"], 0.05)
         seeds = R.parse_seeds(p["seeds"]["confirm"])
         self.assertFalse(set(seeds) & (set(R.FORBIDDEN) | set(R.DEV_ITERATE)
-                                       | set(R.DEV_CHECK)))
+                                       | set(R.DEV_CHECK)
+                                       | set(R.DEV_CHECK_SPENT)))
         fz = led.find("PREREG_FREEZE")[0]["seq"]
         for r in led.records:
             if r["kind"] in ("UNIT_START", "UNIT_END") and \

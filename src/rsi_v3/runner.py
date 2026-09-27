@@ -3,7 +3,8 @@ rsi_v3.runner -- dev iterations, dev-check looks, preregistration freeze,
 confirmatory battery, report. Everything is appended to the v3 ledger.
 
   python3 -m rsi_v3 dev --label NAME --seeds 3001-3012 [--hp JSON]
-  python3 -m rsi_v3 devcheck --label NAME        # seeds 3101-3200, logged
+  python3 -m rsi_v3 devcheck --label NAME        # seeds 3201-3300, logged;
+                                                 # needs a fresh criterion
   python3 -m rsi_v3 freeze
   python3 -m rsi_v3 confirm [--workers 4]
   python3 -m rsi_v3 report
@@ -37,7 +38,8 @@ CONFIRM_LOG = os.path.join(ROOT, "results", "logs", "v3_confirm_units.jsonl")
 CONFIRM_DETAIL = os.path.join(ROOT, "results", "logs",
                               "v3_confirm_detail.jsonl.gz")
 DEV_ITERATE = tuple(range(3001, 3041))
-DEV_CHECK = tuple(range(3101, 3201))
+DEV_CHECK_SPENT = tuple(range(3101, 3201))   # v3devcheck-01: NO_GO
+DEV_CHECK = tuple(range(3201, 3301))         # reserved for the next go/no-go
 FORBIDDEN = tuple(range(1, 41)) + tuple(range(101, 201)) + tuple(
     range(1001, 1301))
 EVALUATOR_FILES = ("rsi_v3/tasks.py", "rsi_v3/evaluate.py",
@@ -306,9 +308,16 @@ def _print(summ, con):
 
 def _dev_like(kind, label, seeds, hp_over, workers, arms, allowed):
     for s in seeds:
-        if s not in allowed or s in FORBIDDEN:
+        if s not in allowed or s in FORBIDDEN or s in DEV_CHECK_SPENT:
             sys.exit("seed %d not allowed for %s" % (s, kind))
     led = Ledger(LEDGER_PATH)
+    if kind == "DEVCHECK":
+        # a go/no-go look is only valid against a criterion written after
+        # the previous look (no re-using an old criterion after peeking)
+        crit = [r["seq"] for r in led.find("GO_NO_GO_CRITERION")]
+        last = [r["seq"] for r in led.find("DEVCHECK_END")]
+        if not crit or (last and max(crit) < max(last)):
+            sys.exit("record a new GO_NO_GO_CRITERION before this dev-check")
     if led.find("PREREG_FREEZE"):
         print("NOTE: protocol already frozen; this run cannot change it")
     hp = json.loads(json.dumps(I.HP))
@@ -358,7 +367,8 @@ def cmd_freeze():
         sys.exit("already frozen (freeze is one-shot)")
     prereg, sha = load_prereg()
     seeds = parse_seeds(prereg["seeds"]["confirm"])
-    bad = set(seeds) & (set(FORBIDDEN) | set(DEV_ITERATE) | set(DEV_CHECK))
+    bad = set(seeds) & (set(FORBIDDEN) | set(DEV_ITERATE) | set(DEV_CHECK)
+                        | set(DEV_CHECK_SPENT))
     if bad:
         sys.exit("confirm seeds overlap forbidden/dev seeds: %s"
                  % sorted(bad)[:5])
@@ -610,7 +620,7 @@ def main(argv=None):
         _dev_like("DEV", a.label, parse_seeds(a.seeds or "3001-3012"),
                   json.loads(a.hp), a.workers, a.arms.split(","), DEV_ITERATE)
     elif a.cmd == "devcheck":
-        _dev_like("DEVCHECK", a.label, parse_seeds(a.seeds or "3101-3200"),
+        _dev_like("DEVCHECK", a.label, parse_seeds(a.seeds or "3201-3300"),
                   json.loads(a.hp), a.workers, a.arms.split(","), DEV_CHECK)
     elif a.cmd == "freeze":
         cmd_freeze()

@@ -43,6 +43,13 @@ version — drag to orbit, click the result orbs — is in `index.html`; open it
 
 ## Results at a glance
 
+**v3 upgrade (see [`results/UPGRADE_V3_RESULTS.md`](results/UPGRADE_V3_RESULTS.md)):** v3 targets v2's failed H2
+(*an adaptive improver beats a frozen one*). A shared meta-predictor is trained on every paired counterfactual
+outcome and carried across a sequence of 10 independent improvement problems. Result: in the pre-registered
+go/no-go on fresh seeds, the meta-learned improver beat its frozen twin on unseen families (+1.35 of 240 tasks,
+p = 0.023). The cross-problem carry-over, however, missed its pre-registered bar. The verdict was **NO_GO**, so the
+confirmatory seeds were not run and v3's H2 remains **unconfirmed**.
+
 **v2 upgrade (see [`results/UPGRADE_V2_RESULTS.md`](results/UPGRADE_V2_RESULTS.md)):** an audit found that v1's
 held-out evaluation seeded each arm's search with the arm's own name, and that v1's one-round control saw 5×
 fewer distinct tasks. The v1 compounding headline did not survive re-running. A new, preregistered,
@@ -50,6 +57,7 @@ compute-matched experiment (`src/rsi_v2`) was then run once on 300 fresh seeds.
 
 | Experiment | Headline | Control | Status |
 |---|---|---|---|
+| **RSI v3: learning how to improve** (pre-registered go/no-go, n = 100 fresh seeds) | meta-learned improver vs frozen twin: **+1.35 tasks** of 240 on unseen families (CI [+0.05, +2.68]); its ranking predicts realized cross-family gain (Spearman +0.066, p < 1e-4), and the advantage grows over later problems | FROZEN_META (same code, tasks, streams, 4.4 M-execution cap) and ADAPTIVE_NOCARRY (predictor reset per problem) | **NO_GO**: cross-problem carry-over +0.53 (p = 0.22) missed its bar → confirmatory seeds 7001–7300 **untouched**; not a confirmed result |
 | **RSI v2: recursive vs one-shot improvement** (preregistered H1) | 5 rounds beat 1 round at 5× compute on **unseen task families**: **+0.40 tasks** (95% CI [+0.10, +0.70]) | SINGLE_5X: same tasks, same attempt streams, same 610k-execution cap, stronger gate | **supported** (Holm p = 0.0098, n = 300); small effect |
 | **RSI v2: adapting the improver itself** (preregistered H2) | adaptive improvement policy vs frozen policy: **−0.08** (CI [−0.35, +0.19]) | RECURSIVE_FROZEN: identical except the policy never learns | **null**; the compounding comes from recursion, not from learning how to improve |
 | ~~Compounding RSI (v1 repaired mechanism)~~ | ~~+1.55 over 1 round at 5×~~ → **retracted**: with shared eval streams the chain is **below** the untrained baseline (−0.70, p = 0.0005), and a data-matched single round beats it (−0.59, p = 0.002) | COLD / R1PLUS_DM, n = 100 | **retracted by audit** |
@@ -64,11 +72,38 @@ compute-matched experiment (`src/rsi_v2`) was then run once on 300 fresh seeds.
 * **v2's positive result is small** (+0.40 of 24 tasks). It is specific to a synthetic domain whose task generator
   has a difficulty ladder by design, and it transfers to novel compositions of shared building blocks, not to
   unrelated domains.
-* **Adapting the improvement process did not beat a frozen improvement policy**, and its failure-mode context was
-  inert.
+* **Adapting the improvement process did not beat a frozen improvement policy** in v2, and its failure-mode
+  context was inert. v3's meta-learned improver does beat its frozen twin in a pre-registered go/no-go look, but
+  the gain is small (+2.3%). Its cross-problem component is not yet detectable on the final metric, and its
+  diagnosis channel does not help the final metric, so it has **not** been confirmed.
 * **Legacy v1 limits:** the meta-RL grid is a full null. Open-ended growth is linear, not accelerating, and
   eventually hits a *search-dilution* wall. Deep *composition* of a transferred skill is limited by its I/O
   interface.
+
+## RSI v3 in one paragraph
+
+A run is a sequence of 10 independent improvement problems. Each has a fresh TRAIN / META-VALIDATION / FINAL
+family split, fresh tasks and a fresh base solver; only a shared ridge meta-predictor may carry from one problem to
+the next. Each round the improver:
+
+1. attempts its training tasks;
+2. computes a continuous failure diagnosis;
+3. generates a pool of structurally different edits, in proportions set by the diagnosis: mining, residual-guided
+   repair mining, hierarchical composition, prior/order repair, exploration repair, and evidence-gated pruning;
+4. **ranks the pool by predicted cross-family gain**;
+5. tests the top candidates counterfactually against the incumbent on cross-family META-VAL probes, with paired
+   streams;
+6. adopts the winner;
+7. trains the predictor on **every candidate × probe paired outcome**.
+
+The FINAL holdout is sealed while any improver runs. Controls:
+* FROZEN_META: identical, but the predictor never learns;
+* ADAPTIVE_NOCARRY: predictor reset for each problem;
+* NODIAG_META: diagnosis removed;
+* SINGLE_COMPUTE_MATCHED: one round with 5× compute.
+
+Every arm gets the same per-problem execution cap. A pre-written go/no-go criterion gates the confirmatory seeds.
+It said NO_GO, and the seeds were left untouched.
 
 ## RSI v2 in one paragraph
 
@@ -106,8 +141,10 @@ self-generated tasks.
 
 ```bash
 # no dependencies — Python 3.8+ standard library only
-python3 -m unittest discover -s tests -v          # v2 anti-cheat suite (~1 min)
+python3 -m unittest discover -s tests -v          # v2 + v3 anti-cheat suites (~1-2 min)
 (cd src && python3 -m rsi_v2 verify && python3 -m rsi_v2 report)   # frozen v2 verdict from the ledger
+(cd src && python3 -m rsi_v3 verify)              # v3 ledger chain (go/no-go was NO_GO; not frozen)
+python3 experiments/v3_devcheck_analysis.py v3devcheck-01-dev10config   # v3 go/no-go tables (read-only)
 python3 experiments/audit_v1_rerun.py report       # v1 audit: old vs shared eval streams
 python3 experiments/v2_analysis.py confirm         # v2 mechanism tables (post hoc)
 python3 src/tforge.py selftest              # VM: branches, loops, halting, crash-safety
@@ -129,6 +166,10 @@ Long-horizon batteries run on any free CPU box (or the Kaggle kernels
 | `src/openforge.py` | open-ended improvement loop (vocabulary growth + self-curriculum) |
 | `src/transferforge.py` | cross-substrate skill transfer experiment |
 | `src/rsi_v2/` | **v2**: adaptive improver, compute-matched arms, frozen tasks/evaluator, ledger, runner (`python3 -m rsi_v2`) |
+| `src/rsi_v3/` | **v3**: meta-learned improver (shared contextual predictor, 6 structurally distinct actions), 3-way family split with sealed final holdout, locked ledger, runner (`python3 -m rsi_v3`) |
+| `tests/test_v3_anticheat.py` | v3 anti-cheat defenses (25 tests) |
+| `results/UPGRADE_V3_RESULTS.md` | v3 design, full dev history (incl. rejected designs), go/no-go (NO_GO), verification checks, limitations |
+| `results/ledger/rsi_v3_ledger.jsonl`, `results/v3_devcheck_report.json` | v3 hash-chained ledger; go/no-go analysis |
 | `tests/test_v2_anticheat.py` | executable anti-cheat defenses (40 tests) |
 | `results/UPGRADE_V2_RESULTS.md` | v2 audit + design + preregistration + confirmatory results + limitations |
 | `results/PREREGISTRATION_V2.json`, `results/ledger/rsi_v2_ledger.jsonl` | frozen protocol; hash-chained ledger of every dev/confirm run |

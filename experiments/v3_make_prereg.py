@@ -59,7 +59,9 @@ prereg = {
                 "evaluation": "identical for all arms: %d executions per "
                               "final-holdout task, stream keyed by (world, "
                               "split, task index) only" % E.EVAL_BUDGET},
-    "seeds": {"dev_iterate": "3001-3040", "dev_check": "3101-3200",
+    "seeds": {"dev_iterate": "3001-3040",
+              "dev_check": "3101-3200 spent (v3devcheck-01, NO_GO); "
+                           "3201-3300 reserved for the next go/no-go",
               "confirm": confirm,
               "never_used": "1-40, 101-200, 1001-1300 (v1/v2)"},
     "arms": ["COLD", "SINGLE_COMPUTE_MATCHED", "FROZEN_META",
