@@ -78,7 +78,7 @@
 const results = [
   { tag:"Compounding RSI (v2, preregistered)", title:"Recursion beats 5× one-shot compute",
     stat:"+0.40 tasks", sub:"5 rounds vs 1 round at 5× compute · unseen task families · Holm p = 0.0098 · n=300",
-    body:"Preregistered, run once on 300 fresh seeds, identical 610k-execution cap. Recursion compounds (small effect); learning HOW to improve (adaptive vs frozen improvement policy) is a null: −0.08. v3 (meta-learned improver carried across 10 problems) beat its frozen twin by +1.35 of 240 unseen-family tasks in a pre-registered go/no-go look, but its cross-problem carry-over missed the bar: NO_GO, confirmatory seeds untouched, unconfirmed. The v1 +1.55 claim was retracted by audit (arm-keyed eval randomness + data confound).",
+    body:"Preregistered, run once on 300 fresh seeds, identical 610k-execution cap. Recursion compounds (small effect); learning HOW to improve (adaptive vs frozen improvement policy) is a null: −0.08. v3 (pre-registered, n=300): an improver whose improvement memory persists across problems and controls how it generates and allocates improvements beats the identical learner with memory wiped between problems by +1.52 unseen-family tasks (p=0.0011); within-problem learning alone is null and the advantage does not grow. The v1 +1.55 claim was retracted by audit (arm-keyed eval randomness + data confound).",
     color:0x34e5c4, pos:[-2.6, 3.4, 1.2] },
   { tag:"MetaForge counterfactual", title:"Searcher improves searcher",
     stat:"+21%", sub:"adaptive vs FROZEN, equal tasks/budgets/seeds",

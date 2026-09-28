@@ -1,7 +1,16 @@
 # UPGRADE V3 — learning *how* to improve: a meta-learned improver, tested against a frozen twin
 
-**Bottom line: the mechanism is real but not yet ready. The pre-registered go/no-go said NO_GO, so the confirmatory
-seeds 7001–7300 were not touched and H2 is not confirmed.**
+> **Final status (Part II, pre-registered confirmation on seeds 7001–7300, n = 300):** a memory-conditioned *process*
+> controller whose improvement memory persists across problems beats the identical learner with memory wiped
+> between problems: **+1.52 final-holdout tasks, p = 0.0011 (H1 supported)**. It also beats the frozen controller
+> (+1.78, H2 supported). Within-problem learning alone does not beat the frozen controller (H3 null), and the
+> advantage does not grow with more experience (H4 null). See **Part II** below. Part I documents the earlier
+> ranking-only design, whose pre-registered go/no-go was NO_GO; it left the confirmatory seeds untouched.
+
+## Part I — the ranking-only meta-predictor (NO_GO)
+
+**Bottom line of Part I: the mechanism was real but not ready. The pre-registered go/no-go said NO_GO, so the
+confirmatory seeds 7001–7300 were not touched and H2 was not confirmed.**
 
 v3 set out to fix v2's failed H2 (*adapting the improver beats a frozen improver*). The adaptive improver
 now learns something measurable, and that learning reaches the final external holdout. The one part of the
@@ -290,3 +299,305 @@ Files:
 * `results/logs/v3_dev_units.jsonl` (compact per-unit records) and `results/logs/v3_dev_detail.jsonl.gz` (full
   per-round detail: pools, screened candidates, features, predictions).
 * `results/v3_devcheck_report.json`: the §5 analysis.
+
+---
+
+# Part II — memory-conditioned adaptive PROCESS controller (confirmed)
+
+**Bottom line.** Persistent improvement memory makes the improver improve itself better on later, unseen problems.
+The pre-registered confirmatory battery ran once on the untouched seeds 7001–7300 (n = 300, identical tasks,
+streams and 4.976 M-execution cap per run, sealed final holdout). It **supports the primary hypothesis**:
+
+| pre-registered hypothesis (frozen report `results/v3_confirm_report.json`) | result |
+|---|---|
+| **H1 (primary): MEMORY_CARRY > NO_CARRY** — the *only* difference is whether the improvement memory survives the world boundary | **Supported.** **+1.52 tasks** of ~64 (95% CI [+0.55, +2.48]); 174 wins / 16 ties / 110 losses; one-sided p = 0.0011 |
+| **H2: MEMORY_CARRY > FROZEN** | **Supported.** **+1.78** [+0.85, +2.73]; Holm p = 0.0006 |
+| **H3: NO_CARRY > FROZEN** | **Null.** +0.25 [−0.67, +1.15]; Holm p = 0.60 |
+| **H4: the MEMORY_CARRY advantage grows over worlds** | **Null.** +0.05 [−0.84, +0.95]; Holm p = 0.60 |
+
+What the evidence supports, and what it does not:
+
+* **Past self-improvement experience causes better future self-improvement decisions on unseen problems.** The
+  learner is identical in MEMORY_CARRY and NO_CARRY, and the two are bit-identical throughout world 1. Only carried
+  memory separates them. The gain appears on the final external holdout, whose task families no improver ever saw.
+  It also appears in the improver's own unbiased signal, cross-family transfer on the tracking probes
+  (+0.0041/probe, p = 0.0001).
+* **Learning within one problem is not enough.** NO_CARRY runs the same learner but wipes its memory at every world,
+  and it does not beat FROZEN (H3 null). The whole gain needs experience accumulated *across* problems.
+* **The ordering MEMORY_CARRY > NO_CARRY > FROZEN is only partly confirmed.** MEMORY_CARRY beats both; NO_CARRY ≈
+  FROZEN.
+* **The advantage does not keep growing.** It appears once one world of experience exists and then holds steady:
+  +0.15 per world in worlds 1–5 (world 1 is 0 by construction), +0.16 in worlds 6–10. The memory's useful knowledge
+  saturates early.
+* **Memory → process control beyond memory → ranking is not established on the final metric.** Persistent memory
+  used *only for ranking* (MEMORY_RANKONLY) gains +1.17 over FROZEN. MEMORY_CARRY beats it by only +0.60 (n.s.). On
+  the meta level MEMORY_CARRY's transfer is higher (+0.0023, p = 0.013), but that did not reach the final holdout
+  detectably. The round-level options (attempt mode, screening shape, exploration, adoption rule) add nothing
+  detectable on the final metric: MEMORY_CARRY − MEMORY_GENONLY = +0.26 (n.s.).
+* **Not "more macros", not "more rounds".** Every arm runs exactly 5 rounds per world. NO_CARRY builds almost as many
+  macros as MEMORY_CARRY (6.5 vs 6.9 per world) with no gain over FROZEN. MEMORY_RANKONLY builds few (5.2) and
+  still gains.
+* **The effect is small**, about +2.4% of the final metric.
+
+This result replaces the NO_GO of the ranking-only design in Part I. The confirmatory seeds 7001–7300 had never
+been run before this battery.
+
+## II.1 What changed: memory → process control
+
+The v3 ranking design used memory to *rank* candidates that a fixed generator had already produced. Its cross-world
+carry-over was null on the final metric. This phase keeps the rsi_v3 system (same tasks, solver, evaluator, ledger,
+seed discipline). It adds `src/rsi_v3/controller.py`: an **improvement memory** plus a **process controller** that
+uses the memory to change *how the system improves itself* on later problems.
+
+**Improvement memory.**
+
+* *Episodic:* one record per tested candidate and per round. Each record holds:
+  * state (a compact context vector) and intervention (the edit variant and its parameters);
+  * resource allocation (the round's plan);
+  * immediate gain (paired screen gain) and delayed same-world gain (the adopted edit's effect on tracking probes,
+    and the return-to-go to the world's end);
+  * cross-world transfer gain (world-end cross-family gain) and compute cost.
+* *Generalised meta-memory:* three components.
+  * A Bayesian ridge value model over edit-variant features × context, fitted on all three horizons.
+  * One Bayesian ridge per round-level process option, with return-to-go as the target.
+  * A retrieval weight that mixes episodic k-nearest-neighbour estimates with the generalised model. It is adapted
+    online from their prediction errors.
+* **Records hold numbers and labels only.** They contain no program, macro, token or task. A test walks the whole
+  controller object after a multi-world run and fails on any solver content. Only experience about *how to improve*
+  can cross a world boundary.
+
+**What the controller decides**, each round, from the memory:
+
+| process dimension | options |
+|---|---|
+| proposal generation | which variants of each strategy are generated, from a parameterised grid: fragment bundle size, prior step 0.2–0.9, flattening, search depth +1/+2, depth-3 composition, pruning |
+| pool allocation across strategies | diagnosis prior × learned value of each strategy's best variant |
+| compute allocation | attempt mode: base / focus (redistribute the round's attempt budget over unsolved tasks) / deep (the same, one token deeper) |
+| probe / evaluation allocation | screening shape 12×4 / 8×6 / 6×8 at roughly constant cost |
+| exploration rate | exploratory ranking slots 0/1/2 plus the Thompson noise scale for generation |
+| plasticity | adoption rule (always / non-inferior); edit intensity through the generated variants |
+| memory retrieval | episodic-vs-generalised mixing weight, adapted from prediction errors |
+
+**Feedback horizons.** Each world reserves a *tracking set* of 16 fresh META-VAL probes that is never used for any
+selection. The incumbent is measured on it before the first round and after every change. That gives two unbiased,
+paired signals:
+* the delayed effect of each adopted edit (T_r − T_{r−1}), and its return-to-go (T_R − T_{r−1});
+* the world's cross-family transfer (T_R − T_0).
+
+Budgets are allotted per round and cannot be banked. So maximising gain under the allotted budget is the same as
+maximising gain per unit of allotted compute. The actual compute is recorded with every decision.
+
+**Arms** (identical tasks, streams and caps: 4.976 M executions per run, 497,600 per world):
+
+| arm | memory written | plan reads memory | ranking reads memory | memory survives the world boundary |
+|---|---|---|---|---|
+| `FROZEN` | no | – | – | – |
+| `NO_CARRY` | yes | yes | yes | **no (wiped)** |
+| `MEMORY_CARRY` | yes | yes | yes | **yes** |
+| `MEMORY_GENONLY` (ablation) | yes | generation and allocation only; round-level options default | yes | yes |
+| `MEMORY_RANKONLY` (ablation: the old mechanism) | yes | no | yes | yes |
+
+The only difference between `MEMORY_CARRY` and `NO_CARRY` is whether the improvement memory persists. Two tests
+check this. The two arms are bit-identical throughout world 1. `NO_CARRY`'s memory holds exactly one world's
+records at every world end.
+
+## II.2 Safeguards added for this phase (`tests/test_v3_anticheat.py`, `TestProcessController`)
+
+| check | test |
+|---|---|
+| The process machinery is the v3 process: with the v3 variant list as the prior, `FROZEN` makes exactly `FROZEN_META`'s decisions (also verified at full budgets on 16 dev seeds: identical final solvers and scores) | `test_frozen_reproduces_v3_frozen_decisions`, `test_default_grid_equals_v3_generator` |
+| The uninformed prior draws the same pool for every arm that has no memory | `test_default_prior_is_arm_independent` |
+| `MEMORY_CARRY` ≡ `NO_CARRY` in world 1; `NO_CARRY` wipes memory; `MEMORY_CARRY` accumulates it | `test_carry_and_nocarry_identical_in_world_one`, `test_nocarry_wipes_memory_carry_keeps_it` |
+| Memory holds no solver content (no config, candidate, macro token or primitive) | `test_memory_holds_no_solver_content` |
+| `FROZEN`'s controller never learns and always uses the default plan | `test_frozen_controller_never_learns` |
+| Identical caps across the process arms; exact metering; zero program executions by the controller; its cost counted across resets | `test_caps_identical_and_metered`, `test_equal_caps_and_metered`, `test_meta_compute_counted_across_resets` |
+| Learned memory changes real process decisions (pools and round-level options). The ablations change only what they are allowed to change | `test_learned_memory_changes_process_decisions` |
+| Tracking probes are META-VAL only and disjoint from the round probes; the final holdout stays sealed and unreachable (AST checks extended to `controller.py`) | `test_tracking_probes_are_metaval_and_disjoint`, `test_improver_has_no_final_holdout_path`, `test_streams_never_use_arm` |
+| A new dev check needs a new criterion; spent go/no-go seeds are refused | `test_devcheck_needs_fresh_criterion_and_unspent_seeds` |
+
+## II.3 Development history (dev seeds 3001–3100; every battery is in the ledger)
+
+| battery | what was run | result | decision |
+|---|---|---|---|
+| (analysis) | observational look at the spent v3 go/no-go battery (1,000 FROZEN worlds) | At the level of **edit variants**, the improver's META-VAL signal agrees with the sealed final holdout (r = 0.63 over 26 variants); at the level of individual candidates it does not (r = −0.045). Variant-level differences need hundreds of observations. | Target process knowledge that is learnable only across worlds: *how to generate and allocate*, not which candidate to rank first |
+| pc-01 | every new round-level option as a **fixed** setting on FROZEN only (n = 24) | focus −1.00, deep +1.29, broad screen +0.04, deep screen −0.71 (all n.s.) | defaults unchanged |
+| pc-02 | the four arms, first build (n = 24) | MEMORY_CARRY − NO_CARRY +0.75 (n.s.). Transfer +0.0096/probe (p = 0.003). Round-level option draws near-random: 60% non-default | add a switching margin; calibrate the option noise from data |
+| pc-03 | fresh seeds 3041–3088 (n = 48) | MEMORY_CARRY 64.96 > NO_CARRY 62.77 > FROZEN 58.10. Carry +2.19 (p = 0.053). Round-1 carry effect p = 0.021. Process control beats rank-only memory by +4.13 (p = 0.002) | check whether the control is the strongest fixed one |
+| pc-04a | **control-strength check**: FROZEN with a fixed uninformed prior over the *whole* variant grid (n = 48) | **+3.21 over FROZEN with the v3 list (p = 0.007).** Against it, NO_CARRY is only +1.46 and MEMORY_CARRY +3.65 (p = 0.006) | **the v3-list FROZEN was a weak control**; the whole-grid prior becomes the default for every arm |
+| pc-04b | ablation MEMORY_GENONLY (round-level options at default) | +0.35 below MEMORY_CARRY (n.s.) | the carry effect lives mainly in memory → generation |
+| pc-05 | all five arms under the stronger control (n = 48) | MEMORY_CARRY 63.46 > NO_CARRY 61.94 ≈ MEMORY_RANKONLY 61.90 ≈ MEMORY_GENONLY 61.83 > FROZEN 61.31. Carry +1.52 (p = 0.13). Candidate quality rises with experience only under persistent memory (0.0053 → 0.0062 → 0.0102) | stop tuning; run the reserved go/no-go |
+
+Three points deserve emphasis, because each is where a positive result could have been manufactured:
+
+1. **The control was strengthened, not weakened.** Under the original v3 prior, NO_CARRY beat FROZEN by +4.7.
+   pc-04a showed that most of that came from the richer variant grid, which a *fixed* uninformed policy also gets.
+   The stronger prior was adopted for every arm (FROZEN and every learner's no-memory start). That cut
+   MEMORY_CARRY's margin over FROZEN from +6.9 to +2.1. The go/no-go uses the stronger control.
+2. **Round-level process options did not earn their keep.** No fixed alternative beat the default (pc-01). The
+   learned option models are data-starved: return-to-go has SD 0.051 against option differences of about 0.005,
+   which would need about 400 rounds, and a run has 50. With the switching margin, their draws still deviate from
+   the default about 50% of the time. The ablation (MEMORY_GENONLY) attributes the carry effect mainly to
+   memory → generation.
+3. **Where the carry-over value is lost.** Persistent memory produces measurably better candidates, and more so
+   with experience. The carried memory also predicts screen outcomes far better than a within-world memory
+   (corr 0.35 vs 0.12). But the adopted edits' unbiased effect on the tracking probes improves only about 15%.
+   Choosing one winner from 8 candidates on 6 noisy probes dilutes the advantage. Memory cannot fix that
+   selection step: its predictions do not correlate with an adopted edit's unbiased effect (≈0), so
+   memory-driven adoption was not attempted.
+
+## II.4 The go/no-go look (seeds 3201–3300, reserved, never run before)
+
+The criterion (ledger `GO_NO_GO_CRITERION`, phase `process-controller`) was recorded **before** any seed in
+3201–3300 ran. It fixed:
+* the configuration (the pc-05 code and HP, by hash);
+* the arms;
+* five conditions, all required.
+
+`experiments/pc_gonogo.py` was committed beforehand and computed the verdict mechanically. The ledger shows the code
+and HP hashes unchanged from the criterion through the end of the look.
+
+| condition (n = 100, 10 worlds per run, 4.976 M executions per run for every arm) | result | |
+|---|---|---|
+| MEMORY_CARRY − NO_CARRY, final external holdout, one-sided p < 0.05 | **+1.29** [−0.17, +2.70], p = 0.046; 56 wins / 3 ties / 41 losses | pass (narrowly) |
+| MEMORY_CARRY − FROZEN, final external holdout, p < 0.05 | **+2.08** [+0.45, +3.75], p = 0.007 | pass |
+| MEMORY_CARRY − NO_CARRY, world-end cross-family transfer on the tracking probes, p < 0.10 | +0.0046 per probe [+0.0009, +0.0084], p = 0.010 | pass |
+| persistence: MEMORY_CARRY − NO_CARRY per world over worlds 6–10 > 0 | +0.22 per world (worlds 1–5: +0.04) | pass |
+| decisions change: MEMORY_CARRY's pool overlap with the default pool (worlds ≥ 2) < 0.8 | 0.39 | pass |
+| **verdict** | **GO** | |
+
+Informational (from the same look): NO_CARRY − FROZEN was +0.79 (p = 0.15). MEMORY_CARRY − MEMORY_RANKONLY was
+**+0.08** (n.s.). On this look, persistent memory used for ranking alone did as well as persistent memory used for
+process control, unlike on dev (+4.13 under the old prior, +1.56 under the stronger prior). Per world,
+MEMORY_CARRY − NO_CARRY was 0.00, −0.11, −0.22, +0.18, +0.36, −0.10, +0.46, +0.30, +0.36, +0.06. The GO triggered
+the pre-registration and freeze **before** any confirmatory seed ran.
+
+## II.5 Confirmatory battery (seeds 7001–7300, run exactly once after `PREREG_FREEZE`)
+
+**Protocol.** `results/PREREGISTRATION_V3.json` was written from the unchanged go/no-go code and HP and committed
+first. The one-shot `PREREG_FREEZE` then hashed:
+* the pre-registration;
+* the HP;
+* every `rsi_v3` and `rsi_v2` source file;
+* the evaluator;
+* the task library;
+* the confirm-seed manifests.
+
+With the protocol frozen, `test_frozen_protocol_if_frozen` runs and passes. All 1,500 units (5 arms × 300 seeds)
+ran once: 0 missing, 0 abandoned, 0 restarts. The frozen runner then produced `results/v3_confirm_report.json` and
+the ledger's `REPORT` record. `python3 -m rsi_v3 verify` reports that the chain and all hashes match.
+
+### II.5.1 Means per run (final holdout `ext` out of 240 tasks over 10 worlds; `in` out of 160)
+
+| arm | ext | in | macros / world | executions spent (cap 4,976,000) |
+|---|---|---|---|---|
+| MEMORY_CARRY | **65.89** | **49.85** | 6.91 | 4,236,838 |
+| MEMORY_GENONLY | 65.63 | 49.75 | 6.98 | 4,112,962 |
+| MEMORY_RANKONLY | 65.28 | 49.34 | 5.20 | 4,118,668 |
+| NO_CARRY | 64.36 | 48.17 | 6.47 | 4,131,922 |
+| FROZEN | 64.11 | 47.37 | 4.89 | 4,133,244 |
+
+MEMORY_CARRY spends about 2.5% more of the identical cap: its learned attempt modes use attempt budget that the
+default leaves idle. That is not the source of the gain. MEMORY_GENONLY spends *less* than FROZEN and gains the same
++1.52.
+
+### II.5.2 Confirmatory tests (one-sided paired sign-flip permutation; fixed-sequence gatekeeping, Holm among H2–H4; α = 0.05)
+
+| hypothesis | field | mean | 95% CI | w / t / l | p | adjusted p | verdict |
+|---|---|---|---|---|---|---|---|
+| H1 MEMORY_CARRY − NO_CARRY | ext | **+1.523** | [+0.55, +2.48] | 174 / 16 / 110 | 0.0011 | 0.0011 | **supported** |
+| H2 MEMORY_CARRY − FROZEN | ext | **+1.777** | [+0.85, +2.73] | 176 / 14 / 110 | 0.0002 | 0.0006 | **supported** |
+| H3 NO_CARRY − FROZEN | ext | +0.253 | [−0.67, +1.15] | 132 / 15 / 153 | 0.30 | 0.60 | null |
+| H4 growth (MEMORY_CARRY − NO_CARRY, worlds 6–10 minus 1–5) | ext_late_minus_early | +0.050 | [−0.84, +0.95] | 136 / 17 / 147 | 0.46 | 0.60 | null |
+
+### II.5.3 Pre-registered exploratory contrasts (two-sided, descriptive)
+
+| contrast | mean | 95% CI | p |
+|---|---|---|---|
+| MEMORY_CARRY − MEMORY_RANKONLY (process control beyond ranking) | +0.60 | [−0.24, +1.47] | 0.19 |
+| MEMORY_CARRY − MEMORY_GENONLY (round-level options) | +0.26 | [−0.60, +1.14] | 0.56 |
+| MEMORY_GENONLY − NO_CARRY (persistent memory → generation) | +1.27 | [+0.37, +2.15] | 0.006 |
+| MEMORY_RANKONLY − FROZEN (persistent memory → ranking) | +1.17 | [+0.28, +2.06] | 0.011 |
+| MEMORY_CARRY − NO_CARRY, in-family holdout | +1.68 | [+0.89, +2.48] | 0.0001 |
+| MEMORY_CARRY − FROZEN, in-family holdout | +2.48 | [+1.66, +3.30] | < 1e-4 |
+
+## II.6 Verification checks (in the frozen report)
+
+| check | result |
+|---|---|
+| **Does the advantage grow as experience accumulates?** | Per world, MEMORY_CARRY − NO_CARRY: 0.00, +0.30, +0.26, −0.13, +0.30, +0.19, +0.07, +0.05, +0.29, +0.19. That is +0.15 in worlds 1–5 and +0.16 in worlds 6–10; the per-seed trend is n.s. **The advantage appears from world 2 on and persists, but does not grow.** |
+| **Does memory improve future self-improvement on unseen families** (world-end cross-family transfer, tracking probes never used for selection)? | MEMORY_CARRY − NO_CARRY **+0.0041/probe [+0.0022, +0.0060], p = 0.0001**. Against FROZEN +0.0066 (p < 1e-4), against MEMORY_GENONLY +0.0022 (p = 0.006), against MEMORY_RANKONLY +0.0023 (p = 0.013). |
+| **Does the controller change actual process decisions?** | Mean pool overlap with the default pool by world: MEMORY_CARRY 0.51 → 0.39 → 0.40; NO_CARRY about 0.50 flat; FROZEN and MEMORY_RANKONLY 1.00 by construction. MEMORY_CARRY's round-level options are non-default in about 50% of rounds from world 3 (the options model first has ≥ 10 rows at world 3). **Yes: memory changes what is generated and how compute and probes are allocated, not just internal scores.** |
+| Does the learned value predict real future cross-family gain? | Within-round rank validity for MEMORY_CARRY is +0.015 (p = 0.0001): positive but tiny. The learned generation has already filled the pool with similar-valued variants, which restricts the range. |
+| Identical task / RNG / compute conditions | Identical caps (4,976,000 per run, 497,600 per world) for all 1,500 units. Metered spend equals the process-global counter in every unit. Streams are arm-independent (AST test). |
+| Meta-controller compute | MEMORY_CARRY per run: 4,395 training rows, 100 closed-form refits, 2,552 predictions, 9,157 episodic retrievals, 5.6 Mflop, 0.26 s wall. **0 program executions** (asserted), against 4.24 M metered program executions in the same run. |
+| No final-holdout leakage | Final rows are sealed at runtime while any improver runs and absent from its view. Learning and tracking rows come from META-VAL probes only. No code path from improver or controller to the final holdout (AST). The memory holds no solver content. All tested. |
+
+## II.7 Causal reading: what the carried memory does
+
+The arms form a ladder that isolates each channel. On the confirmatory battery:
+
+| step | final-holdout effect | reading |
+|---|---|---|
+| FROZEN → NO_CARRY (the learner, memory wiped every world) | +0.25 (n.s.) | within one 5-round problem the learner has too little experience to beat an uninformed prior |
+| NO_CARRY → MEMORY_GENONLY (memory persists; it drives generation, allocation and ranking) | **+1.27** (p = 0.006) | carried experience about *which kinds of edits to generate* is the main channel |
+| MEMORY_GENONLY → MEMORY_CARRY (plus round-level options) | +0.26 (n.s.) | compute / probe / exploration / adoption options add nothing detectable |
+| FROZEN → MEMORY_RANKONLY (memory persists, used for ranking only) | **+1.17** (p = 0.011) | carried experience also helps when it only reorders a fixed generator's pool |
+| MEMORY_RANKONLY → MEMORY_CARRY | +0.60 (n.s.); transfer +0.0023 (p = 0.013) | process control beyond ranking: positive, not established on the final metric |
+
+**What the memory learns** (dev diagnostics, confirmed by the adopted edits in the confirmatory battery):
+* Avoid flattening the search prior. Share of adoptions that are EXPLORE edits in the confirmatory battery:
+  FROZEN 16.4%, MEMORY_RANKONLY 10.9%, NO_CARRY 9.1%, MEMORY_CARRY 6.1%, MEMORY_GENONLY 5.8%.
+* Avoid pruning (2.3% of FROZEN's adoptions, 0.7% of MEMORY_CARRY's).
+* Favour mined macro bundles (MINE 50.5% of MEMORY_CARRY's adoptions vs 35.9% of FROZEN's), often combined with a
+  prior refit, and residual-guided repairs (RESID 8.4% vs 5.9%).
+
+This knowledge is at the level of *edit variants*, where the improver's META-VAL signal agrees with the final
+holdout. It needs far more observations than one 5-round problem supplies, which is why only carried memory
+exploits it. It also saturates within a world or two, which is why the advantage does not keep growing.
+
+## II.8 Limitations and honest boundaries
+
+* **Small effect in a synthetic domain.** +1.5 of about 64 final-holdout tasks per run (+2.4%). Transfer is to
+  unseen *families* of the same stack substrate, not to other domains.
+* **No growth.** The pre-registered growth hypothesis is null. A memory that kept improving the improver would show
+  a widening gap; this one reaches its useful level after about one world.
+* **The strong ordering is not confirmed.** NO_CARRY ≈ FROZEN. The benefit exists only with carried memory.
+* **Process control vs ranking.** On the final metric the pre-registered contrast between full process control and
+  ranking-only memory is +0.60 (n.s.). The round-level options (compute allocation, probe allocation, exploration,
+  adoption rule) are demonstrably *used*: about 50% non-default. But they are data-starved: return-to-go has SD ≈
+  0.05 against option effects of about 0.005, and a run has only 50 decisions. Their contribution is not detectable.
+* **The first control was too weak, and it was caught.** Under the v3 variant list, NO_CARRY − FROZEN was +4.7 on
+  dev. It fell to +0.6 once a fixed whole-grid prior was used, and that stronger prior is what every confirmatory
+  arm uses. Other untested fixed policies might be stronger still.
+* **The go/no-go passed narrowly** (p = 0.046 on the primary). The confirmatory effect (+1.52) matches the
+  go/no-go estimate (+1.29) and the dev estimates (+0.75 to +2.19). The confirmation is what carries the claim.
+* **Dev iterations.** Five dev batteries plus a sweep and a control check on dev seeds 3001–3100 preceded the look.
+  That is why the look used fresh reserved seeds, a pre-written criterion and a hash-pinned configuration, and why
+  the confirmation used never-run seeds under a one-shot freeze.
+
+## II.9 Reproduction
+
+```bash
+python3 -m unittest discover -s tests -v                      # 76 tests (v2 40 + v3 36)
+(cd src && python3 -m rsi_v3 verify)                          # chain + frozen hashes; 0 missing / 0 abandoned
+(cd src && python3 -m rsi_v3 report --out /tmp/rep.json)      # recomputes the frozen report (appends a REPORT record)
+python3 experiments/pc_analysis.py pc-devcheck-01             # go/no-go look tables (read-only)
+python3 experiments/pc_analysis.py pc-05-griddefault          # last dev battery (read-only)
+# re-run any confirmatory unit from scratch and compare every behavioural field
+python3 - <<'PY'
+import sys, json; sys.path.insert(0, 'src')
+from rsi_v3 import runner as R, improver as I
+u = [json.loads(l) for l in open('results/logs/v3_confirm_units.jsonl')][0]
+new = R.compact(R.run_unit((u['arm'], u['seed'], I.HP)))
+print(all(new[k] == u[k] for k in ('ext', 'ext_w', 'final_cfg_shas', 'spent', 'plans_w')))
+PY
+```
+
+Files for this part:
+* `src/rsi_v3/controller.py` (memory + controller).
+* `src/rsi_v3/improver.py`: `run_process`, `build_grid`, and the arms.
+* `experiments/pc_analysis.py`, `experiments/pc_gonogo.py`, `experiments/pc_make_prereg.py`.
+* `results/PREREGISTRATION_V3.json` and `results/v3_confirm_report.json`.
+* Logs: `results/logs/v3_confirm_units.jsonl`, `v3_confirm_detail.jsonl.gz`, `v3_dev_units.jsonl` (labels `pc-*`).
+* The ledger: phase `process-controller` records, the `GO_NO_GO_CRITERION` / `GO_NO_GO_RESULT`, and
+  `PREREG_FREEZE`, `UNIT_*` and `REPORT`.
