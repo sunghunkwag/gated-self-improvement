@@ -1,0 +1,205 @@
+{
+ "algorithm": {
+  "controller": "rsi_v3.controller.ProcessController",
+  "feedback_horizons": "immediate (paired screen gain), delayed (tracking-probe effect of the adopted edit and return-to-go), transfer (world-end cross-family gain on the tracking probes)",
+  "improver_version": "rsi_v3-improver-2",
+  "package": "src/rsi_v3 (+ the rsi_v2 substrate/solver/ledger/stats it imports); every file hashed at freeze",
+  "process_dimensions": [
+   "proposal generation over a parameterised variant grid",
+   "pool allocation across the six strategies",
+   "attempt compute allocation (base / focus / deep)",
+   "screening shape (probe allocation)",
+   "exploration (ranking slots + Thompson scale)",
+   "adoption rule (plasticity)",
+   "memory retrieval weight (episodic vs generalised)"
+  ],
+  "run_structure": "each run = 10 independent improvement problems ('worlds'): fresh TRAIN/META-VAL/FINAL family split, fresh tasks, fresh base solver; only the controller's improvement memory may carry across worlds (MEMORY_CARRY) and it holds numbers and labels only",
+  "value_dim": 36
+ },
+ "arms": [
+  "FROZEN",
+  "NO_CARRY",
+  "MEMORY_CARRY",
+  "MEMORY_GENONLY",
+  "MEMORY_RANKONLY"
+ ],
+ "compute": {
+  "cap_per_arm": 4976000,
+  "cap_per_world": 497600,
+  "evaluation": "identical for all arms: 3000 executions per final-holdout task, stream keyed by (world, split, task index) only",
+  "per_world_meters": "identical child meter per world for every arm (v3 rounds + tracking)",
+  "unit": "one program execution on one input, metered and cross-checked against a process-global counter"
+ },
+ "confirmatory_contrasts": [
+  {
+   "a": "MEMORY_CARRY",
+   "b": "NO_CARRY",
+   "name": "H1_memory_carry_vs_no_carry",
+   "role": "primary"
+  },
+  {
+   "a": "MEMORY_CARRY",
+   "b": "FROZEN",
+   "name": "H2_memory_carry_vs_frozen",
+   "role": "secondary"
+  },
+  {
+   "a": "NO_CARRY",
+   "b": "FROZEN",
+   "name": "H3_no_carry_vs_frozen",
+   "role": "secondary"
+  },
+  {
+   "a": "MEMORY_CARRY",
+   "b": "NO_CARRY",
+   "definition": "per run: final-holdout tasks solved in worlds 6-10 minus worlds 1-5; the contrast is the growth of the MEMORY_CARRY - NO_CARRY advantage as experience accumulates",
+   "field": "ext_late_minus_early",
+   "name": "H4_carry_advantage_grows",
+   "role": "secondary"
+  }
+ ],
+ "dev_history": "v3 ledger: every dev battery, sweep, note, criterion, dev check and verdict, including the failed designs",
+ "exploratory_contrasts": [
+  [
+   "MEMORY_CARRY",
+   "MEMORY_RANKONLY",
+   "ext"
+  ],
+  [
+   "MEMORY_CARRY",
+   "MEMORY_GENONLY",
+   "ext"
+  ],
+  [
+   "MEMORY_GENONLY",
+   "NO_CARRY",
+   "ext"
+  ],
+  [
+   "MEMORY_RANKONLY",
+   "FROZEN",
+   "ext"
+  ],
+  [
+   "MEMORY_CARRY",
+   "NO_CARRY",
+   "in"
+  ],
+  [
+   "MEMORY_CARRY",
+   "FROZEN",
+   "in"
+  ]
+ ],
+ "hp": {
+  "adopt_cost_ratio": 0.9,
+  "alloc_temp": 0.35,
+  "alloc_value_temp": 0.01,
+  "attempt_budget": 1000,
+  "confirm_n": 6,
+  "default_pref": 0.001,
+  "diag_params": false,
+  "finalist": "measured",
+  "focus_max_mult": 3,
+  "gate": "always",
+  "gate_probe_budget": 600,
+  "gate_round_budget": 48000,
+  "gen_default": "grid",
+  "gen_kappa": [
+   0.0,
+   0.5,
+   1.0
+  ],
+  "k_screen": 8,
+  "knn_k": 8,
+  "knn_min": 3,
+  "knob_lam": 3.0,
+  "knob_margin": 0.01,
+  "knob_min_rows": 10,
+  "knob_noise_var": 0.003,
+  "macro_len_max": 12,
+  "mine_max_len": 6,
+  "mine_min_len": 2,
+  "n_rounds": 5,
+  "n_worlds": 10,
+  "near_miss_fit": 0.5,
+  "new_macro_boost": 2.0,
+  "noise_var": 0.055,
+  "p_random_max": 0.6,
+  "partial_weight": 0.5,
+  "pool_size": 24,
+  "prior_floor": 0.08,
+  "prior_var": 0.0015,
+  "proc_defaults": {
+   "attempt": 0,
+   "explore": 1,
+   "gate": 0,
+   "shape": 1
+  },
+  "prune_dead_ratio": 0.34,
+  "refit_strength": 8.0,
+  "resid_max_tasks": 8,
+  "resid_pair_tasks": 3,
+  "retrieval_eta": 20.0,
+  "return_weight": 0.5,
+  "ridge_lam": 3.0,
+  "screen_n": 6,
+  "single_pool_size": 36,
+  "track_evals": 6,
+  "track_n": 16,
+  "track_weight": 1.0
+ },
+ "hp_sha": "84e232eadd35a18c7a357dc77b2e71c2b4805a4981e4bb08df3f4e58eb4c980a",
+ "power": "From the go/no-go look (seeds 3201-3300, n=100; estimates selected on a GO, so optimistic): H1 MEMORY_CARRY-NO_CARRY mean +1.29, SD 7.55 -> n=300 SE 0.44, power ~0.91 (one-sided alpha 0.05); H2 MEMORY_CARRY-FROZEN +2.08, SD 8.38 -> power ~1.00; H3 NO_CARRY-FROZEN +0.79, SD 7.43 -> power ~0.58 before multiplicity; H4 growth (ext_late_minus_early) +0.87, SD 7.34 -> power ~0.66 before multiplicity.",
+ "primary_metric": {
+  "definition": "per run: total number of FINAL-HOLDOUT tasks (24 per world, from the world's FINAL families, never seen by any improver) solved exactly on train and hidden test examples, summed over all 10 worlds",
+  "field": "ext",
+  "split": "holdout_ext"
+ },
+ "seeds": {
+  "confirm": "7001-7300",
+  "dev_check": "3101-3200 spent (v3 ranking design, NO_GO); 3201-3300 (process-controller go/no-go)",
+  "dev_iterate": "3001-3100",
+  "never_used": "1-40, 101-200, 1001-1300 (v1/v2)"
+ },
+ "statistics": {
+  "alpha": 0.05,
+  "decision_rule": "supported iff mean(a - b) > 0 and the adjusted p < alpha; otherwise reported as null",
+  "multiplicity": "fixed-sequence gatekeeping: H1 (primary) is tested alone at alpha; only if H1 is supported are H2, H3 and H4 tested, Holm-adjusted among themselves at alpha (family-wise error <= alpha)",
+  "test": "paired (by run seed) sign-flip permutation test, one-sided H_a: mean(a - b) > 0, 20000 permutations from a fixed deterministic stream"
+ },
+ "stopping_and_integrity": "every (arm, seed) runs exactly once after the PREREG_FREEZE ledger record; no interim looks; a crashed unit may only be re-run deterministically (UNIT_RESTART); the frozen runner produces the report whatever it says",
+ "tasks": {
+  "families": [
+   24,
+   12,
+   6
+  ],
+  "library_digest": "3c93d3036ffea0fce16d20a4af493468998ed993c517ec9e24f84a4eecd09a69",
+  "splits": {
+   "holdout_ext": 24,
+   "holdout_in": 16,
+   "metaval": 96,
+   "train": 40
+  },
+  "version": "rsi_v3-tasks-1"
+ },
+ "title": "rsi_v3 process controller, confirmatory battery: does persistent improvement memory (memory -> process control) make an improver improve itself better on later, unseen improvement problems, at identical tasks, streams and execution budgets?",
+ "verification_checks": [
+  "growth: per-world MEMORY_CARRY - NO_CARRY, second-half mean vs first-half mean, paired test of the per-seed difference",
+  "transfer: per-seed mean world-end cross-family gain on the tracking probes, MEMORY_CARRY vs each baseline",
+  "decisions change: pool overlap with the default pool and share of non-default round-level options, per world, per arm",
+  "meta-controller compute logged (rows/refits/predictions/flops/retrievals/seconds); zero program executions asserted",
+  "identical caps and per-world caps across arms; spent <= cap; metered spend == global execution counter for every unit"
+ ],
+ "verification_spec": {
+  "baselines": [
+   "NO_CARRY",
+   "FROZEN",
+   "MEMORY_GENONLY",
+   "MEMORY_RANKONLY"
+  ],
+  "treatment": "MEMORY_CARRY"
+ },
+ "written_before_confirmatory_runs": true
+}
