@@ -161,6 +161,9 @@ def compact(full):
             if a:
                 acts[a] = acts.get(a, 0) + 1
     out["adopted_actions"] = acts
+    ew = full["ext_w"]
+    out["ext_late_minus_early"] = sum(ew[len(ew) // 2:]) - sum(
+        ew[:len(ew) // 2])
     out["final_cfg_shas"] = [wd["final_cfg_sha"] for wd in full["worlds"]]
     out["macros_w"] = [wd["n_macros"] for wd in full["worlds"]]
     if "memory_resets" in full:
@@ -529,11 +532,19 @@ def build_report(led):
     alpha = prereg["statistics"]["alpha"]
     comps = {}
     for c in prereg["confirmatory_contrasts"]:
-        d = [tab[(c["a"], s)][metric] - tab[(c["b"], s)][metric]
+        # a secondary contrast may name its own per-unit field (e.g. the
+        # growth of the final-holdout score over worlds); the primary is
+        # always the final-holdout metric
+        field = c.get("field", metric)
+        assert c["role"] != "primary" or field == metric
+        d = [tab[(c["a"], s)][field] - tab[(c["b"], s)][field]
              for s in seeds]
-        sm = ST.summary(d, "v3confirm|%s-%s" % (c["a"], c["b"]),
-                        one_sided=True)
-        comps[c["name"]] = dict(sm, a=c["a"], b=c["b"], role=c["role"])
+        tag = "v3confirm|%s-%s" % (c["a"], c["b"])
+        if field != metric:
+            tag += "|" + field
+        sm = ST.summary(d, tag, one_sided=True)
+        comps[c["name"]] = dict(sm, a=c["a"], b=c["b"], role=c["role"],
+                                field=field)
     gatekeeping(comps, alpha)
     rep["confirmatory"] = comps
     expl = {}

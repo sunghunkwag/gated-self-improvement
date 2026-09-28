@@ -367,6 +367,8 @@ class TestProtocolV3(unittest.TestCase):
 
 PTINY = copy.deepcopy(TINY)
 PTINY.update({"n_worlds": 3})
+V3GEN = copy.deepcopy(PTINY)
+V3GEN.update({"gen_default": "v3"})
 
 
 def _run_capture(arm, seed=SEED, hp=PTINY):
@@ -396,8 +398,10 @@ class TestProcessController(unittest.TestCase):
         cls.runs = {a: _run_capture(a) for a in I.PROCESS_ARMS}
 
     def test_frozen_reproduces_v3_frozen_decisions(self):
-        _c, v3 = I.run_arm("FROZEN_META", SEED, PTINY)
-        _c, fr, _k = self.runs["FROZEN"]
+        """The machinery is the v3 process: with the v3 variant list as the
+        default generator, FROZEN makes exactly FROZEN_META's decisions."""
+        _c, v3 = I.run_arm("FROZEN_META", SEED, V3GEN)
+        _c, fr, _k = _run_capture("FROZEN", SEED, V3GEN)
         self.assertEqual([w["final_cfg_sha"] for w in v3["worlds"]],
                          [w["final_cfg_sha"] for w in fr["worlds"]])
         for a, b in zip(v3["worlds"], fr["worlds"]):
@@ -454,6 +458,17 @@ class TestProcessController(unittest.TestCase):
         state = {k: v for k, v in vars(ctrl).items() if k != "hp"}
         walk(state)
         self.assertGreater(len(ctrl.episodes), 0)
+
+    def test_default_prior_is_arm_independent(self):
+        """The uninformed whole-grid prior draws the same pool for every
+        arm that has no memory: FROZEN, and every learner in world 1 round 1
+        (and NO_CARRY in round 1 of every world)."""
+        first = {a: self.runs[a][1]["worlds"][0]["rounds"][0]["pool"]
+                 for a in I.PROCESS_ARMS}
+        self.assertEqual(len({json.dumps(p) for p in first.values()}), 1)
+        fr, nc = self.runs["FROZEN"][1], self.runs["NO_CARRY"][1]
+        self.assertEqual(fr["worlds"][0]["rounds"][0]["pool_default"],
+                         fr["worlds"][0]["rounds"][0]["pool"])
 
     def test_frozen_controller_never_learns(self):
         _c, rec, ctrl = self.runs["FROZEN"]
@@ -526,8 +541,8 @@ class TestProcessController(unittest.TestCase):
     def test_default_grid_equals_v3_generator(self):
         """The variant grid's default portion reproduces the v3 pool for
         real states (so FROZEN is the unchanged v3 process)."""
-        _c, v3 = I.run_arm("FROZEN_META", SEED + 1, PTINY)
-        _c, fr, _k = _run_capture("FROZEN", SEED + 1)
+        _c, v3 = I.run_arm("FROZEN_META", SEED + 1, V3GEN)
+        _c, fr, _k = _run_capture("FROZEN", SEED + 1, V3GEN)
         pa = [rd["pool"] for w in v3["worlds"] for rd in w["rounds"]]
         pb = [rd["pool"] for w in fr["worlds"] for rd in w["rounds"]]
         self.assertEqual(pa, pb)

@@ -58,8 +58,10 @@ Arms (identical code path, flags differ; identical execution cap):
 PROCESS-CONTROL arms (rsi_v3.controller: memory -> process control; every
 one runs the same loop, the same generator and the same per-world
 tracking evaluation, with identical caps):
-  FROZEN                  controller never learns: default plan, shared
-                          random ranking (the v3 FROZEN_META decisions)
+  FROZEN                  controller never learns: default plan (uninformed
+                          prior over the whole variant grid; with
+                          gen_default "v3" exactly the v3 FROZEN_META
+                          decisions), shared random ranking
   NO_CARRY                controller learns within a world; its improvement
                           memory and meta-state are wiped at every world
   MEMORY_CARRY            the same learner; memory persists across worlds
@@ -130,9 +132,11 @@ HP = {
     "alloc_value_temp": 0.01, "track_weight": 1.0, "return_weight": 0.5,
     "focus_max_mult": 3,
     # default (uninformed) generation: "v3" = the v3 generator's own list
-    # (FROZEN == v3 FROZEN_META), "grid" = a shared random subset of the
-    # whole variant grid
-    "gen_default": "v3",
+    # (then FROZEN == v3 FROZEN_META), "grid" = a shared random subset of
+    # the whole variant grid. "grid" is the stronger FIXED control (dev
+    # pc-04a: +3.21 ext over the v3 list on FROZEN, p=0.007), so it is the
+    # default for every process arm (FROZEN and every learner's prior).
+    "gen_default": "grid",
 }
 
 N_STATE = 15
