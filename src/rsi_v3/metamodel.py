@@ -30,7 +30,7 @@ class Ridge(object):
         # never executes a program; its cost is floating-point arithmetic
         self.ops = {"rows": 0, "refits": 0, "predictions": 0, "flops": 0}
 
-    def add(self, x, y):
+    def add(self, x, y, wt=1.0):
         if self.frozen:
             raise AssertionError("frozen meta-predictor received data")
         A, b = self.A, self.b
@@ -38,8 +38,8 @@ class Ridge(object):
         for i, vi in nz:
             row = A[i]
             for j, vj in nz:
-                row[j] += vi * vj
-            b[i] += vi * y
+                row[j] += wt * vi * vj
+            b[i] += wt * vi * y
         self.n += 1
         self.ops["rows"] += 1
         self.ops["flops"] += 2 * len(nz) * len(nz) + 2 * len(nz)
@@ -48,6 +48,7 @@ class Ridge(object):
         if self.frozen:
             return
         L = cholesky(self.A)
+        self.L = L
         self.w = chol_solve(L, self.b)
         d = self.dim
         self.ops["refits"] += 1
@@ -57,6 +58,61 @@ class Ridge(object):
         self.ops["predictions"] += 1
         self.ops["flops"] += 2 * self.dim
         return sum(wi * xi for wi, xi in zip(self.w, x))
+
+    # ---- Bayesian view (used by the process controller): with prior
+    # w ~ N(0, noise_var / lam) and per-row noise noise_var, A = lam I +
+    # sum wt x x^T is the posterior precision / noise_var.
+    def pred_sd(self, x, noise_var):
+        """Posterior sd of x^T w (not of a new observation)."""
+        L = getattr(self, "L", None)
+        if L is None:
+            L = cholesky(self.A)
+            self.L = L
+        z = forward(L, x)
+        self.ops["flops"] += self.dim * self.dim
+        return math.sqrt(noise_var * sum(v * v for v in z))
+
+    def sample_w(self, noise_var, prng):
+        """One Thompson draw w ~ N(w_hat, noise_var A^-1)."""
+        L = getattr(self, "L", None)
+        if L is None:
+            L = cholesky(self.A)
+            self.L = L
+        xi = [gauss(prng) for _ in range(self.dim)]
+        z = backward(L, xi)                   # L^T z = xi -> cov A^-1
+        self.ops["flops"] += self.dim * self.dim
+        sd = math.sqrt(noise_var)
+        return [wi + sd * zi for wi, zi in zip(self.w, z)]
+
+
+def gauss(prng):
+    """Standard normal from a deterministic stream (Box-Muller)."""
+    u1 = max(prng.unit(), 1e-300)
+    u2 = prng.unit()
+    return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+
+
+def forward(L, b):
+    n = len(L)
+    y = [0.0] * n
+    for i in range(n):
+        s = b[i]
+        Li = L[i]
+        for k in range(i):
+            s -= Li[k] * y[k]
+        y[i] = s / Li[i]
+    return y
+
+
+def backward(L, y):
+    n = len(L)
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        s = y[i]
+        for k in range(i + 1, n):
+            s -= L[k][i] * x[k]
+        x[i] = s / L[i][i]
+    return x
 
 
 def cholesky(A):

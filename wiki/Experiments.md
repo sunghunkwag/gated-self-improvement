@@ -11,6 +11,7 @@
 | 7 | SDT gate integrity | Which gate designs resist wireheading? | `python3 src/sdt_layer.py report` |
 | 8 | **RSI v2** (preregistered) | Does recursion beat 5× one-shot compute, and does adapting the improver help? | `cd src && python3 -m rsi_v2 report` |
 | 9 | Anti-cheat suite | Can any of the v2 / v3 defenses be bypassed? | `python3 -m unittest discover -s tests -v` |
-| 10 | **RSI v3** (pre-registered go/no-go: NO_GO) | Does a meta-learned improver (carried across problems) beat a frozen one at equal compute? | `python3 experiments/v3_devcheck_analysis.py v3devcheck-01-dev10config` |
+| 10 | RSI v3 Part I (go/no-go: NO_GO) | Does a ranking-only meta-predictor carried across problems beat a frozen one? | `python3 experiments/v3_devcheck_analysis.py v3devcheck-01-dev10config` |
+| 11 | **RSI v3 Part II** (pre-registered, H1 supported) | Does persistent improvement memory, used for process control, make later self-improvement better? | `cd src && python3 -m rsi_v3 verify && python3 -m rsi_v3 report` |
 
 Long-horizon versions live in `experiments/kaggle/` (offline CPU kernels).

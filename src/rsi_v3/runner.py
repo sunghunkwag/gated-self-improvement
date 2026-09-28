@@ -37,7 +37,8 @@ DEV_DETAIL = os.path.join(ROOT, "results", "logs", "v3_dev_detail.jsonl.gz")
 CONFIRM_LOG = os.path.join(ROOT, "results", "logs", "v3_confirm_units.jsonl")
 CONFIRM_DETAIL = os.path.join(ROOT, "results", "logs",
                               "v3_confirm_detail.jsonl.gz")
-DEV_ITERATE = tuple(range(3001, 3041))
+DEV_ITERATE = tuple(range(3001, 3101))    # 3041-3100 added for the
+                                          # process-controller phase
 DEV_CHECK_SPENT = tuple(range(3101, 3201))   # v3devcheck-01: NO_GO
 DEV_CHECK = tuple(range(3201, 3301))         # reserved for the next go/no-go
 FORBIDDEN = tuple(range(1, 41)) + tuple(range(101, 201)) + tuple(
@@ -110,6 +111,8 @@ def run_unit(job):
            "meta_seconds": round(sum(rd.get("meta_seconds", 0.0)
                                      for x in ws for rd in x["rounds"]), 3),
            "rank_validity": rank_validity_unit(ws)}
+    if "memory_resets" in rec:
+        out["memory_resets"] = rec["memory_resets"]
     out.update(SG.self_score(cfgs[-1], seed))
     if arm == "COLD":
         out["replicate_ext"] = sum(rep)
@@ -158,9 +161,48 @@ def compact(full):
             if a:
                 acts[a] = acts.get(a, 0) + 1
     out["adopted_actions"] = acts
+    ew = full["ext_w"]
+    out["ext_late_minus_early"] = sum(ew[len(ew) // 2:]) - sum(
+        ew[:len(ew) // 2])
     out["final_cfg_shas"] = [wd["final_cfg_sha"] for wd in full["worlds"]]
     out["macros_w"] = [wd["n_macros"] for wd in full["worlds"]]
+    if "memory_resets" in full:
+        out.update(process_summary(full["worlds"]))
     return out
+
+
+def process_summary(worlds):
+    """Process-control arms: per world, how far the controller's actual
+    decisions moved away from the default (v3) process, plus the tracking
+    horizon (T_0 .. T_R, cross-family transfer) and the retrieval weight."""
+    div, knob_nd, alloc_l1, jac, learned = [], [], [], [], []
+    for wd in worlds:
+        rs = wd["rounds"]
+        nd = [sum(1 for k, dflt in rd["plan_default"].items() if not dflt)
+              / float(len(rd["plan_default"])) for rd in rs]
+        l1 = []
+        for rd in rs:
+            a, b = rd.get("alloc") or {}, rd.get("alloc_default") or {}
+            keys = set(a) | set(b)
+            tot = float(max(1, sum(b.values())))
+            l1.append(sum(abs(a.get(x, 0) - b.get(x, 0)) for x in keys)
+                      / tot)
+        knob_nd.append(sum(nd) / len(nd))
+        alloc_l1.append(sum(l1) / len(l1))
+        jac.append(sum(rd["pool_jaccard"] for rd in rs) / len(rs))
+        learned.append(sum(1 for rd in rs if rd["pool_learned"]) / len(rs))
+    return {"knob_nondefault_w": [round(x, 4) for x in knob_nd],
+            "alloc_l1_w": [round(x, 4) for x in alloc_l1],
+            "pool_jaccard_w": [round(x, 4) for x in jac],
+            "pool_learned_w": [round(x, 4) for x in learned],
+            "transfer_w": [wd["transfer"] for wd in worlds],
+            "track_w": [wd["track"] for wd in worlds],
+            "omega_w": [wd["memory"]["omega"] for wd in worlds],
+            "plans_w": [[[rd["plan"][k] for k in ("attempt", "shape",
+                                                  "explore", "gate")]
+                         for rd in wd["rounds"]] for wd in worlds],
+            "adopted_w": [[rd.get("adopted") for rd in wd["rounds"]]
+                          for wd in worlds]}
 
 
 def rank_validity_unit(worlds):
@@ -263,8 +305,20 @@ def summarize(results, arms, seeds):
                    "mq_w": [sum(x[w] for x in mqw) / n
                             for w in range(len(mqw[0]))],
                    "spent": sum(r["spent"] for r in rs) / n}
+        if "pool_jaccard_w" in rs[0]:
+            W = len(rs[0]["pool_jaccard_w"])
+            for f in ("pool_jaccard_w", "knob_nondefault_w", "alloc_l1_w"):
+                summ[a][f] = [round(sum(r[f][w] for r in rs) / n, 4)
+                              for w in range(W)]
+            tr = [[r["transfer_w"][w] for r in rs
+                   if r["transfer_w"][w] is not None] for w in range(W)]
+            summ[a]["transfer_w"] = [round(sum(x) / len(x), 5) if x else None
+                                     for x in tr]
     con = {}
-    for a, b in (("ADAPTIVE_META", "FROZEN_META"),
+    for a, b in (("MEMORY_CARRY", "NO_CARRY"), ("MEMORY_CARRY", "FROZEN"),
+                 ("NO_CARRY", "FROZEN"), ("MEMORY_CARRY", "MEMORY_RANKONLY"),
+                 ("MEMORY_RANKONLY", "FROZEN"),
+                 ("ADAPTIVE_META", "FROZEN_META"),
                  ("ADAPTIVE_META", "SINGLE_COMPUTE_MATCHED"),
                  ("ADAPTIVE_META", "NODIAG_META"),
                  ("ADAPTIVE_META", "ADAPTIVE_NOCARRY"),
@@ -301,6 +355,11 @@ def _print(summ, con):
                   m["train"], m["macros"], m["adopt"],
                   "%.4f" % m["meta_quality"] if m["meta_quality"] is not None
                   else "-", m["spent"]))
+    for a, m in summ.items():
+        if "pool_jaccard_w" in m:
+            print("%-24s pool~default %s knobs!=default %s transfer %s" % (
+                a, m["pool_jaccard_w"], m["knob_nondefault_w"],
+                m["transfer_w"]))
     for k, v in con.items():
         print("  %-52s %+.4f [%+.3f, %+.3f] p=%.4f w/t/l=%s" % (
             k, v["mean"], v["ci95"][0], v["ci95"][1], v["p"], v["w/t/l"]))
@@ -473,11 +532,19 @@ def build_report(led):
     alpha = prereg["statistics"]["alpha"]
     comps = {}
     for c in prereg["confirmatory_contrasts"]:
-        d = [tab[(c["a"], s)][metric] - tab[(c["b"], s)][metric]
+        # a secondary contrast may name its own per-unit field (e.g. the
+        # growth of the final-holdout score over worlds); the primary is
+        # always the final-holdout metric
+        field = c.get("field", metric)
+        assert c["role"] != "primary" or field == metric
+        d = [tab[(c["a"], s)][field] - tab[(c["b"], s)][field]
              for s in seeds]
-        sm = ST.summary(d, "v3confirm|%s-%s" % (c["a"], c["b"]),
-                        one_sided=True)
-        comps[c["name"]] = dict(sm, a=c["a"], b=c["b"], role=c["role"])
+        tag = "v3confirm|%s-%s" % (c["a"], c["b"])
+        if field != metric:
+            tag += "|" + field
+        sm = ST.summary(d, tag, one_sided=True)
+        comps[c["name"]] = dict(sm, a=c["a"], b=c["b"], role=c["role"],
+                                field=field)
     gatekeeping(comps, alpha)
     rep["confirmatory"] = comps
     expl = {}
@@ -498,31 +565,36 @@ def build_report(led):
                               "spent", "self_solved")} for a in arms}
     rep["caps"] = {a: sorted({tab[(a, s)]["cap"] for s in seeds})
                    for a in arms}
-    rep["verification"] = verification(tab, seeds, arms)
+    rep["verification"] = verification(tab, seeds, arms,
+                                       prereg.get("verification_spec"))
     prim = [c for c in comps.values() if c["role"] == "primary"][0]
     rep["verdict"] = ("PRIMARY PASSED" if prim["pass"]
                       else "PRIMARY NOT SUPPORTED (null)")
     return rep
 
 
-def verification(tab, seeds, arms):
-    """Pre-registered verification checks reported with the verdict."""
-    v = {}
+def verification(tab, seeds, arms, spec=None):
+    """Pre-registered verification checks reported with the verdict.
+    spec: {"treatment": arm, "baselines": [arms]} (default: the v3 ranking
+    design)."""
+    spec = spec or {"treatment": "ADAPTIVE_META",
+                    "baselines": ["FROZEN_META", "ADAPTIVE_NOCARRY"]}
+    t = spec["treatment"]
+    v = {"treatment": t}
     W = len(tab[(arms[0], seeds[0])]["ext_w"])
+    n = float(len(seeds))
     # 1. the advantage persists / grows across later worlds
-    for b in ("FROZEN_META", "ADAPTIVE_NOCARRY"):
+    for b in spec["baselines"]:
         if b not in arms:
             continue
-        per_w = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
-                     - tab[(b, s)]["ext_w"][w] for s in seeds)
-                 / float(len(seeds)) for w in range(W)]
-        trend = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
-                     - tab[(b, s)]["ext_w"][w] for w in range(W // 2, W))
-                 - sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
-                       - tab[(b, s)]["ext_w"][w] for w in range(W // 2))
-                 for s in seeds]
+        per_w = [sum(tab[(t, s)]["ext_w"][w] - tab[(b, s)]["ext_w"][w]
+                     for s in seeds) / n for w in range(W)]
+        trend = [sum(tab[(t, s)]["ext_w"][w] - tab[(b, s)]["ext_w"][w]
+                     for w in range(W // 2, W))
+                 - sum(tab[(t, s)]["ext_w"][w] - tab[(b, s)]["ext_w"][w]
+                       for w in range(W // 2)) for s in seeds]
         sm = ST.summary(trend, "v3verif|trend|%s" % b)
-        v["per_world_ADAPTIVE_minus_%s" % b] = {
+        v["per_world_%s_minus_%s" % (t, b)] = {
             "per_world": [round(x, 4) for x in per_w],
             "first_half": sum(per_w[:W // 2]) / (W // 2),
             "second_half": sum(per_w[W // 2:]) / (W - W // 2),
@@ -531,21 +603,38 @@ def verification(tab, seeds, arms):
     rho = []
     for s in seeds:
         xs = [w["spearman_within_round"] for w in
-              tab[("ADAPTIVE_META", s)]["rank_validity"][1:]
+              tab[(t, s)]["rank_validity"][1:]
               if w["spearman_within_round"] is not None]
         if xs:
             rho.append(sum(xs) / len(xs))
-    v["rank_validity_ADAPTIVE"] = dict(
-        ST.summary(rho, "v3verif|rho", one_sided=True),
-        note="per-seed mean within-round Spearman between the predictor's "
-             "score (computed BEFORE evaluation) and the realized paired "
-             "gain on fresh cross-family META-VAL probes, worlds >= 2")
-    v["rank_validity_by_world"] = [
-        (lambda xs: sum(xs) / len(xs) if xs else None)(
-            [tab[("ADAPTIVE_META", s)]["rank_validity"][w]
-             ["spearman_within_round"] for s in seeds
-             if tab[("ADAPTIVE_META", s)]["rank_validity"][w]
-             ["spearman_within_round"] is not None]) for w in range(W)]
+    if rho:
+        v["rank_validity_%s" % t] = dict(
+            ST.summary(rho, "v3verif|rho", one_sided=True),
+            note="per-seed mean within-round Spearman between the "
+                 "predictor's score (computed BEFORE evaluation) and the "
+                 "realized paired gain on fresh cross-family META-VAL "
+                 "probes, worlds >= 2")
+    # 3. process-control arms: future self-improvement (world-end
+    # cross-family transfer on the tracking probes) and whether the
+    # learned controller changed actual process decisions
+    if "transfer_w" in tab[(t, seeds[0])]:
+        def tr(u):
+            xs = [x for x in u["transfer_w"] if x is not None]
+            return sum(xs) / len(xs) if xs else 0.0
+        for b in spec["baselines"]:
+            if b in arms:
+                v["transfer_%s_minus_%s" % (t, b)] = ST.summary(
+                    [tr(tab[(t, s)]) - tr(tab[(b, s)]) for s in seeds],
+                    "v3verif|transfer|%s" % b, one_sided=True)
+        dec = {}
+        for a in arms:
+            if "pool_jaccard_w" not in tab[(a, seeds[0])]:
+                continue
+            dec[a] = {f: [round(sum(tab[(a, s)][f][w] for s in seeds) / n,
+                                4) for w in range(W)]
+                      for f in ("pool_jaccard_w", "knob_nondefault_w",
+                                "alloc_l1_w")}
+        v["process_decisions_by_world"] = dec
     # 3. meta-controller compute is logged and uses no program executions
     mc = {}
     for a in arms:

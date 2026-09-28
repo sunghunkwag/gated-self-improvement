@@ -54,6 +54,22 @@ Arms (identical code path, flags differ; identical execution cap):
                           both generation (uniform) and predictor features
   HEURISTIC_META          exploratory: fixed hand ranking (generator's own
                           preference x diagnosed need)
+
+PROCESS-CONTROL arms (rsi_v3.controller: memory -> process control; every
+one runs the same loop, the same generator and the same per-world
+tracking evaluation, with identical caps):
+  FROZEN                  controller never learns: default plan (uninformed
+                          prior over the whole variant grid; with
+                          gen_default "v3" exactly the v3 FROZEN_META
+                          decisions), shared random ranking
+  NO_CARRY                controller learns within a world; its improvement
+                          memory and meta-state are wiped at every world
+  MEMORY_CARRY            the same learner; memory persists across worlds
+  MEMORY_RANKONLY         ablation: persistent memory used for ranking only
+                          (memory -> ranking, the failed v3 mechanism)
+  MEMORY_GENONLY          ablation: persistent memory controls generation,
+                          allocation and ranking; round-level options
+                          (attempt, shape, exploration, gate) stay default
 """
 import math
 import time
@@ -62,9 +78,10 @@ from rsi_v2 import substrate as S
 from rsi_v2 import solver as SV
 from rsi_v2.improver import shortest_parse, entropy_ratio, simplify
 from . import tasks as T
+from . import controller as C
 from .metamodel import Ridge
 
-VERSION = "rsi_v3-improver-1"
+VERSION = "rsi_v3-improver-2"
 ACTIONS = ("MINE", "RESID", "COMPOSE", "PRIOR", "EXPLORE", "PRUNE")
 ARMS = ("COLD", "SINGLE_COMPUTE_MATCHED", "FROZEN_META", "ADAPTIVE_META",
         "NODIAG_META", "HEURISTIC_META", "ADAPTIVE_NOCARRY")
@@ -73,6 +90,9 @@ DIAGNOSTIC_ARMS = ("ORACLE_RANK",)   # dev-only headroom probes; never
 LEARNING_ARMS = ("ADAPTIVE_META", "NODIAG_META", "ADAPTIVE_NOCARRY")
 CARRY_ARMS = ("ADAPTIVE_META", "NODIAG_META")   # predictor persists across
                                                 # worlds; NOCARRY resets it
+PROCESS_ARMS = ("FROZEN", "NO_CARRY", "MEMORY_CARRY", "MEMORY_RANKONLY",
+                "MEMORY_GENONLY")
+ARMS = ARMS + PROCESS_ARMS
 
 HP = {
     "n_worlds": 10,
@@ -98,6 +118,25 @@ HP = {
     # adoption gate chosen on FROZEN_META only (strongest control on dev)
     "gate": "always", "finalist": "measured",
     "screen_n": 6, "confirm_n": 6, "diag_params": False,
+    # ---- process controller (PROCESS_ARMS only) ----
+    # default plan = the v3 FROZEN_META process; the knob options are
+    # controller.KNOBS, indices below
+    "proc_defaults": {"attempt": 0, "shape": 1, "explore": 1, "gate": 0},
+    "track_n": 16, "track_evals": 6,    # tracking probes, evaluations/world
+    # knob noise var = empirical variance of return-to-go (dev pc-02:
+    # 0.0026); margin ~ 1/5 of its sd
+    "knob_lam": 3.0, "knob_min_rows": 10, "knob_noise_var": 0.003,
+    "knob_margin": 0.01,
+    "knn_min": 3, "knn_k": 8, "retrieval_eta": 20.0,
+    "gen_kappa": (0.0, 0.5, 1.0), "default_pref": 0.001,
+    "alloc_value_temp": 0.01, "track_weight": 1.0, "return_weight": 0.5,
+    "focus_max_mult": 3,
+    # default (uninformed) generation: "v3" = the v3 generator's own list
+    # (then FROZEN == v3 FROZEN_META), "grid" = a shared random subset of
+    # the whole variant grid. "grid" is the stronger FIXED control (dev
+    # pc-04a: +3.21 ext over the v3 list on FROZEN, p=0.007), so it is the
+    # default for every process arm (FROZEN and every learner's prior).
+    "gen_default": "grid",
 }
 
 N_STATE = 15
@@ -463,13 +502,21 @@ def compose_sources(state, traces, meter, hp):
 # candidate pool
 
 class Cand(object):
-    __slots__ = ("action", "label", "cfg", "delta", "h", "x", "mu")
+    __slots__ = ("action", "label", "cfg", "delta", "h", "x", "mu",
+                 "params", "pos", "sd", "mu_r", "mu_k", "score", "inc_sha",
+                 "dflt")
 
-    def __init__(self, action, label, cfg, delta, h):
+    def __init__(self, action, label, cfg, delta, h, params=None, pos=0,
+                 inc_sha=None, dflt=True):
         self.action, self.label, self.cfg = action, label, cfg
         self.delta, self.h = delta, h
         self.x = None
         self.mu = 0.0
+        self.params = params if params is not None else [0.0] * C.N_PARAM
+        self.pos = pos
+        self.sd = self.mu_r = self.mu_k = self.score = None
+        self.inc_sha = inc_sha
+        self.dflt = dflt          # part of the v3 generator's own list
 
 
 MACRO_VARIANTS = ((0,), (1,), (0, 1), (0, 1, 2), (2,), (0, 1, 2, 3, 4),
@@ -650,6 +697,166 @@ def generate_pool(state, traces, train, v, info, meter, hp, diag_on, size):
             h = 1.0 - j / float(max(1, len(items)))
             pool.append(Cand(a, lb, c, deltas(state, c, sups), h))
     return pool, alloc, nd
+
+
+# --------------------------------------------------------------------------
+# parameterised variant GRID (process arms). The first part of every
+# strategy's list is the v3 generator's own order, so the default plan
+# (take the first n_a of each strategy) reproduces the v3 pool exactly;
+# the rest are further settings of the same knobs (bundle size, prior step,
+# flattening, search depth, composition depth) that only a learned plan
+# can reach.
+
+N_MACRO_DEFAULT = len(MACRO_VARIANTS) + 2     # v3 list: 10 + 2 "+PRIOR"
+MACRO_GRID = tuple([x for vi, pk in enumerate(MACRO_VARIANTS)
+                    for x in ([(pk, 0.0), (pk, 0.4)] if vi in (0, 2)
+                              else [(pk, 0.0)])]
+                   + [((0,), 0.7), ((0, 1), 0.7), ((0, 1, 2), 0.4),
+                      ((0, 1, 2), 0.7), ((0, 1, 2, 3, 4), 0.4),
+                      ((0, 1, 2, 3), 0.0), ((0, 1, 2, 3, 4), 0.7)])
+COMPOSE3_GRID = (((0,), 0.0), ((0,), 0.4), ((0, 1), 0.0))
+PRIOR_GRID = tuple(list(FIXED_PRIOR) + [("PRIOR[sol0.9]", "sol", 0.9),
+                                        ("PRIOR[sol+near0.7]", "both", 0.7),
+                                        ("PRIOR[near0.6]", "near", 0.6)])
+EXPLORE_GRID = tuple(list(FIXED_EXPLORE) + [("EXPLORE[depth+2]", 0.0, 2),
+                                            ("EXPLORE[0.15+depth]", 0.15,
+                                             1)])
+
+
+def _plabel(lam):
+    return "" if lam == 0.0 else ("+PRIOR" if lam == 0.4
+                                  else "+PRIOR%.1f" % lam)
+
+
+def compose3_sources(state, traces, meter, hp):
+    """Depth-3 composition: three consecutive tokens of solutions / near
+    misses, at least one of them a macro (macro-of-macro-of-...)."""
+    cfg = state.cfg
+    if not cfg.macros:
+        return []
+    sources = [shortest_parse(state.solved[i], cfg)
+               for i in sorted(state.solved)]
+    for t in traces:
+        if (not t.solved and t.best_prog is not None
+                and t.best_fit >= hp["near_miss_fit"]):
+            sources.append(tuple(t.best_prog))
+    support = {}
+    for src in sources:
+        seen = []
+        for a, b, c in zip(src, src[1:], src[2:]):
+            if not (SV.is_macro(a) or SV.is_macro(b) or SV.is_macro(c)):
+                continue
+            if (a, b, c) not in seen:
+                seen.append((a, b, c))
+        for tr in seen:
+            support[tr] = support.get(tr, 0) + 1
+    existing = {SV.expansion(t) for t in cfg.macros}
+    ks = known_sigs(state, cfg, meter)
+    out, taken = [], []
+    for tr, sp in sorted(support.items(), key=lambda kv: (-kv[1], kv[0])):
+        if sp < 2:
+            continue
+        fr = SV.expansion(tr[0]) + SV.expansion(tr[1]) + SV.expansion(tr[2])
+        if len(fr) > hp["macro_len_max"] or fr in existing:
+            continue
+        sg = frag_sig(state, fr, meter)
+        if sg in ks or sg in taken:
+            continue
+        taken.append(sg)
+        out.append((fr, sp))
+    return out
+
+
+def _grid_macros(state, action, ranked, grid, hp, compose3=False):
+    out = []
+    for gi, (pick, lam) in enumerate(grid):
+        sel = [ranked[i] for i in pick if i < len(ranked)]
+        if len(sel) != len(pick):
+            continue
+        c = add_macros(state.cfg, [fr for fr, _s in sel], hp)
+        if lam > 0.0:
+            c = refit(c, solution_parses(state, c), lam, hp)
+            if c is None:
+                continue
+        name = "COMPOSE3" if compose3 else action
+        out.append(("%s%s%s" % (name, list(pick), _plabel(lam)), c,
+                    [sp for _f, sp in sel],
+                    [len(pick) / 5.0, max(pick) / 4.0, lam, 0.0, 0.0, 0.0,
+                     0.0, 1.0 if compose3 else 0.0],
+                    gi < N_MACRO_DEFAULT and not compose3))
+    return out
+
+
+def build_grid(state, traces, train, v, info, meter, hp, diag_on):
+    """Every valid variant of every available strategy, in default order,
+    with its deltas and parameters. Sources are computed in the v3 order
+    (RESID repairs happen before COMPOSE/PRIOR see the solutions).
+    Returns ({action: [Cand]}, default allocation)."""
+    ok = availability(state, traces, diag_on, info, hp)
+    alloc = allocate(v, ok, hp["pool_size"], diag_on, hp)
+    inc_sha = state.cfg.sha()
+    raw = {}
+    for a in ACTIONS:
+        if alloc.get(a, 0) <= 0:
+            raw[a] = []
+            continue
+        if a == "MINE":
+            raw[a] = _grid_macros(state, a, mine_sources(state, meter, hp),
+                                  MACRO_GRID, hp)
+        elif a == "RESID":
+            raw[a] = _grid_macros(state, a, resid_sources(
+                state, traces, train, meter, hp), MACRO_GRID, hp)
+        elif a == "COMPOSE":
+            raw[a] = _grid_macros(state, a, compose_sources(
+                state, traces, meter, hp), MACRO_GRID, hp)
+            raw[a] += _grid_macros(state, a, compose3_sources(
+                state, traces, meter, hp), COMPOSE3_GRID, hp, compose3=True)
+        elif a == "PRIOR":
+            sp = solution_parses(state, state.cfg)
+            nm = [tuple(t.best_prog) for t in traces if not t.solved
+                  and t.best_prog is not None
+                  and t.best_fit >= hp["near_miss_fit"]]
+            src = {"sol": sp, "near": nm, "both": sp + nm}
+            raw[a] = []
+            for gi, (lb, k, lm) in enumerate(PRIOR_GRID):
+                c = refit(state.cfg, src[k], lm, hp)
+                if c is not None:
+                    raw[a].append((lb, c, [], [0.0, 0.0, lm,
+                                               {"sol": 0.0, "near": 1.0,
+                                                "both": 0.5}[k],
+                                               0.0, 0.0, 0.0, 0.0],
+                                   gi < len(FIXED_PRIOR)))
+        elif a == "EXPLORE":
+            raw[a] = [(lb, explore_cfg(state.cfg, e, dp, hp), [],
+                       [0.0, 0.0, 0.0, 0.0, e, dp / 2.0, 0.0, 0.0],
+                       gi < len(FIXED_EXPLORE))
+                      for gi, (lb, e, dp) in enumerate(EXPLORE_GRID)]
+        elif a == "PRUNE":
+            use = {m: 0 for m in state.cfg.macros}
+            for p in solution_parses(state, state.cfg):
+                for t in p:
+                    if t in use:
+                        use[t] += 1
+            order = sorted(state.cfg.macros,
+                           key=lambda m: (use[m], -state.cfg.macros.index(m)))
+            dead = [m for m in order if use[m] == 0]
+            opts = []
+            if dead:
+                opts.append(("PRUNE[dead]", prune_cfg(state.cfg, dead),
+                             len(dead)))
+            opts.append(("PRUNE[1]", prune_cfg(state.cfg, order[:1]), 1))
+            if len(order) >= 2:
+                opts.append(("PRUNE[2]", prune_cfg(state.cfg, order[:2]), 2))
+            raw[a] = [(lb, c, [], [0.0] * 6 + [nd / 3.0, 0.0], True)
+                      for lb, c, nd in opts]
+    grid = {}
+    for a in ACTIONS:
+        items = raw.get(a, [])
+        grid[a] = [Cand(a, lb, c, deltas(state, c, sups),
+                        1.0 - j / float(max(1, len(items))), params=pr,
+                        pos=j, inc_sha=inc_sha, dflt=df)
+                   for j, (lb, c, sups, pr, df) in enumerate(items)]
+    return grid, alloc
 
 
 def _dist(cfg):
@@ -913,6 +1120,209 @@ def run_recursive(seed, train, batches, arm_meter, hp, policy, diag_on,
     return state, model
 
 
+def track_cap(hp):
+    return hp["track_evals"] * hp["track_n"] * hp["gate_probe_budget"]
+
+
+def _deeper(cfg):
+    c = cfg.copy()
+    c.max_tokens = min(6, cfg.max_tokens + 1)
+    return c
+
+
+def _jaccard(a, b):
+    a, b = set(a), set(b)
+    return len(a & b) / float(len(a | b)) if (a or b) else 1.0
+
+
+def run_process(seed, w_idx, train, batches, spare, arm_meter, hp, ctrl,
+                log):
+    """One world under the process controller. The same loop as
+    run_recursive, except that every process decision is taken from the
+    controller's plan, and a fixed TRACKING set of fresh META-VAL probes
+    (never used for any selection) measures the incumbent after each
+    change -- the delayed and transfer horizons of the improvement
+    memory. With the default plan the decisions are exactly v3's."""
+    state = State()
+    R = hp["n_rounds"]
+    tn = hp["track_n"]
+    track_probes, extra = spare[:tn], spare[tn:]
+    trk = arm_meter.child(track_cap(hp), "track")
+    tcache = {}
+
+    def track(cfg):
+        sh = cfg.sha()
+        if sh not in tcache:
+            try:
+                tcache[sh] = [p[1] for p in gate_eval(cfg, track_probes, seed,
+                                                      trk, hp)]
+            except GateExhausted:
+                tcache[sh] = None
+        return tcache[sh]
+
+    T_ = [track(state.cfg)]
+    rounds = []
+    last_fit = 0.0
+    for r in range(1, R + 1):
+        pk = C.stream(seed, "ctrl-knob", r)
+        ctx_pre = [r / float(R), len(state.solved) / 40.0, last_fit,
+                   min(1.0, len(state.cfg.macros) / 10.0),
+                   state.inc_rates[-1] if state.inc_rates else 0.0]
+        a_opt, a_def = ctrl.choose("attempt", ctx_pre, pk)
+        mode = C.KNOBS["attempt"][a_opt]
+        att = arm_meter.child(len(train) * hp["attempt_budget"], "attempt")
+        if mode == "base":             # exactly v3
+            comp = SV.Compiled(state.cfg)
+            traces = [attempt(state, comp, task, i, hp["attempt_budget"],
+                              stream(seed, "attempt", r, i), att)
+                      for i, task in enumerate(train)
+                      if i not in state.solved]
+        else:                          # redistribute the round's budget
+            uns = [i for i in range(len(train)) if i not in state.solved]
+            b = min(hp["focus_max_mult"] * hp["attempt_budget"],
+                    att.cap // max(1, len(uns)) - 16)
+            comp = SV.Compiled(state.cfg if mode == "focus"
+                               else _deeper(state.cfg))
+            traces = []
+            for i in uns:
+                try:
+                    traces.append(attempt(state, comp, train[i], i, b,
+                                          stream(seed, "attempt", r, i), att))
+                except S.BudgetExceeded:
+                    break
+        v, vd, info = diagnose(state, traces, r, hp)
+        last_fit = v[10]
+        ctx = C.context(v, r, hp)
+        s_opt, s_def = ctrl.choose("shape", ctx, pk)
+        e_opt, e_def = ctrl.choose("explore", ctx, pk)
+        g_opt, g_def = ctrl.choose("gate", ctx, pk)
+        k, sn = C.shape(s_opt, hp)
+        explore = C.KNOBS["explore"][e_opt]
+        rule = C.KNOBS["gate"][g_opt]
+        gate = arm_meter.child(hp["gate_round_budget"], "gate")
+        rec = {"round": r, "attempted": len(traces), "attempt_mode": mode,
+               "newly_solved": sum(1 for t in traces if t.solved),
+               "diag": vd, "screened": [], "adopted": None,
+               "plan": {"attempt": a_opt, "shape": s_opt, "explore": e_opt,
+                        "gate": g_opt},
+               "plan_default": {"attempt": a_def, "shape": s_def,
+                                "explore": e_def, "gate": g_def}}
+        try:
+            grid, alloc_def = build_grid(state, traces, train, v, info, gate,
+                                         hp, True)
+        except S.BudgetExceeded:
+            grid, alloc_def = {}, {}
+        rec["train_solved"] = len(state.solved)
+        batch = [(r, j, t) for j, t in enumerate(batches[r - 1])]
+        cn = hp["confirm_n"]
+        if sn <= len(batch) - cn:
+            screen = batch[:sn]
+        else:
+            ne = sn - (len(batch) - cn)
+            screen = batch[:len(batch) - cn] + extra[ne * (r - 1):ne * r]
+        confirm = batch[len(batch) - cn:]
+        try:
+            inc_s = gate_eval(state.cfg, screen, seed, gate, hp)
+            inc_c = gate_eval(state.cfg, confirm, seed, gate, hp)
+        except GateExhausted:
+            inc_s = inc_c = None
+        inc_mean = (sum(p[1] for p in inc_s) / len(inc_s)) if inc_s else 0.0
+        t_meta = time.perf_counter()
+        pool, pinfo = ctrl.plan_pool(grid, alloc_def, v, ctx, inc_mean, r,
+                                     explore, seed)
+        rec["alloc"] = pinfo["alloc"]
+        rec["alloc_default"] = pinfo["alloc_default"]
+        rec["pool"] = [c.label for c in pool]
+        rec["pool_default"] = pinfo["pool_default"]
+        rec["pool_learned"] = pinfo["learned"]
+        rec["pool_jaccard"] = round(_jaccard(rec["pool"],
+                                             rec["pool_default"]), 4)
+        screened, adopted_cand = [], None
+        if inc_s is not None and pool:
+            picks = ctrl.rank(pool, v, ctx, inc_mean, r, k, explore,
+                              stream(seed, "select", r))
+            rec["meta_seconds"] = round(time.perf_counter() - t_meta, 4)
+            results = []
+            for i in picks:
+                c = pool[i]
+                try:
+                    per = gate_eval(c.cfg, screen, seed, gate, hp)
+                except GateExhausted:
+                    rec["screened"].append({"label": c.label,
+                                            "incomplete": True})
+                    break
+                ys = [(pc[1] - pi[1], pi[1]) for pc, pi in zip(per, inc_s)]
+                results.append([c, per, None, ys])
+                rec["screened"].append({
+                    "label": c.label, "action": c.action,
+                    "mu": round(c.mu or 0.0, 5),
+                    "sd": round(c.sd, 5) if c.sd is not None else None,
+                    "y_mean": round(sum(y for y, _p in ys) / len(ys), 5),
+                    "solved": tot(per)[0]})
+            live = [t for t in results if tot(t[1])[0] >= tot(inc_s)[0]]
+            if live:
+                fin = max(live, key=lambda t: (tot(t[1])[0], tot(t[1])[2],
+                                               -tot(t[1])[1]))
+                try:
+                    fin[2] = gate_eval(fin[0].cfg, confirm, seed, gate, hp)
+                except GateExhausted:
+                    fin[2] = None
+                if fin[2] is not None:
+                    fin[3] = fin[3] + [(pc[1] - pi[1], pi[1]) for pc, pi in
+                                       zip(fin[2], inc_c)]
+                    tc = (tot(fin[1])[0] + tot(fin[2])[0],
+                          tot(fin[1])[1] + tot(fin[2])[1])
+                    ti = (tot(inc_s)[0] + tot(inc_c)[0],
+                          tot(inc_s)[1] + tot(inc_c)[1])
+                    rec["confirm"] = {"label": fin[0].label,
+                                      "cand": list(tc), "inc": list(ti)}
+                    if rule == "noninferior":
+                        ok = (tot(fin[2])[0] >= tot(inc_c)[0]
+                              and tc[0] >= ti[0])
+                    else:
+                        ok = True
+                    if ok:
+                        rec["adopted"] = fin[0].label
+                        rec["adopted_action"] = fin[0].action
+                        state.cfg = fin[0].cfg
+                        adopted_cand = fin[0]
+            screened = [(t[0], t[3], tot(t[1])[1]) for t in results]
+        if inc_s is not None:
+            state.inc_rates.append((tot(inc_s)[0] + tot(inc_c)[0])
+                                   / float(len(inc_s) + len(inc_c)))
+        t_prev = T_[-1]
+        t_new = track(state.cfg) if adopted_cand is not None else t_prev
+        T_.append(t_new)
+        t_meta = time.perf_counter()
+        n_rows = ctrl.observe_screen(screened, v, ctx, r, w_idx)
+        if adopted_cand is not None:
+            n_rows += ctrl.observe_track(adopted_cand, v, r, t_prev, t_new,
+                                         w_idx)
+        ctrl.refit()
+        rec["meta_seconds"] = round(rec.get("meta_seconds", 0.0)
+                                    + time.perf_counter() - t_meta, 4)
+        rec["n_rows"] = n_rows
+        rec["omega"] = round(ctrl.omega(), 4)
+        rec["track"] = (round(sum(t_new) / len(t_new), 5)
+                        if t_new is not None else None)
+        rec["n_macros"] = len(state.cfg.macros)
+        rec["macros"] = list(state.cfg.macros)
+        rec["attempt_spent"] = att.spent
+        rec["gate_spent"] = gate.spent
+        log.append(rec)
+        rounds.append({"rnd": r, "ctx_pre": ctx_pre, "ctx": ctx,
+                       "plan": rec["plan"], "adopted_cand": adopted_cand,
+                       "v": v, "compute": att.spent + gate.spent})
+    t_meta = time.perf_counter()
+    endw = ctrl.end_world(w_idx, rounds, T_)
+    wrec = {"track": [round(sum(t) / len(t), 5) if t is not None else None
+                      for t in T_],
+            "transfer": endw["transfer"], "track_spent": trk.spent,
+            "memory": ctrl.snapshot(),
+            "end_seconds": round(time.perf_counter() - t_meta, 4)}
+    return state, wrec
+
+
 def run_single(seed, train, batches, arm_meter, hp, log):
     state = State()
     R = hp["n_rounds"]
@@ -987,6 +1397,8 @@ def run_arm(arm, seed, hp=None):
     with an identical cap, so no arm can shift compute between worlds."""
     hp = hp or HP
     assert arm in ARMS or arm in DIAGNOSTIC_ARMS, arm
+    if arm in PROCESS_ARMS:
+        return run_process_arm(arm, seed, hp)
     views = [T.improver_view(world_key(seed, w), hp["n_rounds"])
              for w in range(1, hp["n_worlds"] + 1)]
     wcap = world_cap(hp, len(views[0][0]))
@@ -1046,3 +1458,55 @@ def run_arm(arm, seed, hp=None):
         "meta_ops": {k: ops_done[k] + model.ops[k] for k in model.ops}
         if model else None,
         "meta_program_executions": 0}
+
+
+def process_controller(arm, hp):
+    return C.ProcessController(
+        hp, learn=arm != "FROZEN",
+        use_process=arm in ("NO_CARRY", "MEMORY_CARRY", "MEMORY_GENONLY"),
+        use_rank=arm != "FROZEN", use_knobs=arm != "MEMORY_GENONLY")
+
+
+def run_process_arm(arm, seed, hp):
+    """The process-control arms. Identical per-world caps (v3 rounds +
+    tracking), identical tasks and streams; the arms differ only in whether
+    the controller learns (FROZEN does not), whether the plan reads memory
+    (MEMORY_RANKONLY: ranking only), and whether memory survives the world
+    boundary (NO_CARRY: wiped)."""
+    R = hp["n_rounds"]
+    views = [T.improver_view(world_key(seed, w), 8)
+             for w in range(1, hp["n_worlds"] + 1)]
+    wcap = world_cap(hp, len(views[0][0])) + track_cap(hp)
+    cap = hp["n_worlds"] * wcap
+    arm_meter = S.Meter(cap, "arm")
+    g0 = S.EXEC.n
+    ctrl = process_controller(arm, hp)
+    cfgs, worlds = [], []
+    for w in range(1, hp["n_worlds"] + 1):
+        if arm == "NO_CARRY" and w > 1:
+            ctrl.reset()
+        wseed = world_key(seed, w)
+        train, allb = views[w - 1]
+        spare = [(R + 1 + bi, j, t) for bi, bt in enumerate(allb[R:])
+                 for j, t in enumerate(bt)]
+        wm = arm_meter.child(wcap, "world")
+        log = []
+        state, wrec = run_process(wseed, w, train, allb[:R], spare, wm, hp,
+                                  ctrl, log)
+        cfgs.append(state.cfg)
+        wrec.update({"world": w, "train_solved": len(state.solved),
+                     "n_macros": len(state.cfg.macros),
+                     "macros": list(state.cfg.macros), "spent": wm.spent,
+                     "rounds": log, "final_cfg_sha": state.cfg.sha()})
+        worlds.append(wrec)
+    delta = S.EXEC.n - g0
+    if delta != arm_meter.spent:
+        raise S.HiddenComputeError("%s: %d executions, %d metered"
+                                   % (arm, delta, arm_meter.spent))
+    assert arm_meter.spent <= cap
+    return cfgs, {
+        "arm": arm, "seed": seed, "cap": cap, "world_cap": wcap,
+        "spent": arm_meter.spent, "global_delta": delta, "worlds": worlds,
+        "model_w": [round(x, 6) for x in ctrl.value.w],
+        "model_n": ctrl.value.n, "memory_resets": ctrl.resets,
+        "meta_ops": ctrl.ops(), "meta_program_executions": 0}
