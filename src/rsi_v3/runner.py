@@ -554,31 +554,36 @@ def build_report(led):
                               "spent", "self_solved")} for a in arms}
     rep["caps"] = {a: sorted({tab[(a, s)]["cap"] for s in seeds})
                    for a in arms}
-    rep["verification"] = verification(tab, seeds, arms)
+    rep["verification"] = verification(tab, seeds, arms,
+                                       prereg.get("verification_spec"))
     prim = [c for c in comps.values() if c["role"] == "primary"][0]
     rep["verdict"] = ("PRIMARY PASSED" if prim["pass"]
                       else "PRIMARY NOT SUPPORTED (null)")
     return rep
 
 
-def verification(tab, seeds, arms):
-    """Pre-registered verification checks reported with the verdict."""
-    v = {}
+def verification(tab, seeds, arms, spec=None):
+    """Pre-registered verification checks reported with the verdict.
+    spec: {"treatment": arm, "baselines": [arms]} (default: the v3 ranking
+    design)."""
+    spec = spec or {"treatment": "ADAPTIVE_META",
+                    "baselines": ["FROZEN_META", "ADAPTIVE_NOCARRY"]}
+    t = spec["treatment"]
+    v = {"treatment": t}
     W = len(tab[(arms[0], seeds[0])]["ext_w"])
+    n = float(len(seeds))
     # 1. the advantage persists / grows across later worlds
-    for b in ("FROZEN_META", "ADAPTIVE_NOCARRY"):
+    for b in spec["baselines"]:
         if b not in arms:
             continue
-        per_w = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
-                     - tab[(b, s)]["ext_w"][w] for s in seeds)
-                 / float(len(seeds)) for w in range(W)]
-        trend = [sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
-                     - tab[(b, s)]["ext_w"][w] for w in range(W // 2, W))
-                 - sum(tab[("ADAPTIVE_META", s)]["ext_w"][w]
-                       - tab[(b, s)]["ext_w"][w] for w in range(W // 2))
-                 for s in seeds]
+        per_w = [sum(tab[(t, s)]["ext_w"][w] - tab[(b, s)]["ext_w"][w]
+                     for s in seeds) / n for w in range(W)]
+        trend = [sum(tab[(t, s)]["ext_w"][w] - tab[(b, s)]["ext_w"][w]
+                     for w in range(W // 2, W))
+                 - sum(tab[(t, s)]["ext_w"][w] - tab[(b, s)]["ext_w"][w]
+                       for w in range(W // 2)) for s in seeds]
         sm = ST.summary(trend, "v3verif|trend|%s" % b)
-        v["per_world_ADAPTIVE_minus_%s" % b] = {
+        v["per_world_%s_minus_%s" % (t, b)] = {
             "per_world": [round(x, 4) for x in per_w],
             "first_half": sum(per_w[:W // 2]) / (W // 2),
             "second_half": sum(per_w[W // 2:]) / (W - W // 2),
@@ -587,21 +592,38 @@ def verification(tab, seeds, arms):
     rho = []
     for s in seeds:
         xs = [w["spearman_within_round"] for w in
-              tab[("ADAPTIVE_META", s)]["rank_validity"][1:]
+              tab[(t, s)]["rank_validity"][1:]
               if w["spearman_within_round"] is not None]
         if xs:
             rho.append(sum(xs) / len(xs))
-    v["rank_validity_ADAPTIVE"] = dict(
-        ST.summary(rho, "v3verif|rho", one_sided=True),
-        note="per-seed mean within-round Spearman between the predictor's "
-             "score (computed BEFORE evaluation) and the realized paired "
-             "gain on fresh cross-family META-VAL probes, worlds >= 2")
-    v["rank_validity_by_world"] = [
-        (lambda xs: sum(xs) / len(xs) if xs else None)(
-            [tab[("ADAPTIVE_META", s)]["rank_validity"][w]
-             ["spearman_within_round"] for s in seeds
-             if tab[("ADAPTIVE_META", s)]["rank_validity"][w]
-             ["spearman_within_round"] is not None]) for w in range(W)]
+    if rho:
+        v["rank_validity_%s" % t] = dict(
+            ST.summary(rho, "v3verif|rho", one_sided=True),
+            note="per-seed mean within-round Spearman between the "
+                 "predictor's score (computed BEFORE evaluation) and the "
+                 "realized paired gain on fresh cross-family META-VAL "
+                 "probes, worlds >= 2")
+    # 3. process-control arms: future self-improvement (world-end
+    # cross-family transfer on the tracking probes) and whether the
+    # learned controller changed actual process decisions
+    if "transfer_w" in tab[(t, seeds[0])]:
+        def tr(u):
+            xs = [x for x in u["transfer_w"] if x is not None]
+            return sum(xs) / len(xs) if xs else 0.0
+        for b in spec["baselines"]:
+            if b in arms:
+                v["transfer_%s_minus_%s" % (t, b)] = ST.summary(
+                    [tr(tab[(t, s)]) - tr(tab[(b, s)]) for s in seeds],
+                    "v3verif|transfer|%s" % b, one_sided=True)
+        dec = {}
+        for a in arms:
+            if "pool_jaccard_w" not in tab[(a, seeds[0])]:
+                continue
+            dec[a] = {f: [round(sum(tab[(a, s)][f][w] for s in seeds) / n,
+                                4) for w in range(W)]
+                      for f in ("pool_jaccard_w", "knob_nondefault_w",
+                                "alloc_l1_w")}
+        v["process_decisions_by_world"] = dec
     # 3. meta-controller compute is logged and uses no program executions
     mc = {}
     for a in arms:

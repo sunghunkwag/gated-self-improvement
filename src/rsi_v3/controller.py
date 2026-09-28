@@ -127,10 +127,12 @@ class ProcessController(object):
     use_process:  the plan (generation, allocation, knobs) reads memory
     use_rank:     ranking reads memory"""
 
-    def __init__(self, hp, learn, use_process, use_rank, diag_on=True):
+    def __init__(self, hp, learn, use_process, use_rank, diag_on=True,
+                 use_knobs=True):
         self.hp = hp
         self.learn, self.use_process, self.use_rank = (learn, use_process,
                                                        use_rank)
+        self.use_knobs = use_knobs
         self.diag_on = diag_on
         self.ops_done = {"rows": 0, "refits": 0, "predictions": 0,
                          "flops": 0, "retrievals": 0}
@@ -199,7 +201,7 @@ class ProcessController(object):
         rare; a large learned advantage is acted on."""
         d = self.hp["proc_defaults"][knob]
         m = self.knob[knob]
-        if not (self.use_process and self.learn
+        if not (self.use_process and self.use_knobs and self.learn
                 and m.n >= self.hp["knob_min_rows"]):
             return d, True
         w = m.sample_w(self.hp["knob_noise_var"], prng)
@@ -249,8 +251,14 @@ class ProcessController(object):
         size = hp["pool_size"]
         acts = [a for a in ACTIONS if grid.get(a)]
         info = {"alloc_default": dict(alloc_default), "learned": False}
-        default_pick = {a: [c for c in grid[a] if c.dflt][
-            :alloc_default.get(a, 0)] for a in acts}
+        if hp.get("gen_default", "v3") == "grid":
+            # uninformed prior over the WHOLE grid: a shared random subset
+            # (stream keyed by world seed, round, strategy -- not the arm)
+            default_pick = {a: stream(seed, "ctrl-default", rnd, a).shuffled(
+                grid[a])[:alloc_default.get(a, 0)] for a in acts}
+        else:                                  # the v3 generator's own list
+            default_pick = {a: [c for c in grid[a] if c.dflt][
+                :alloc_default.get(a, 0)] for a in acts}
         dpool = _dedupe([(a, default_pick[a]) for a in acts])
         info["pool_default"] = [c.label for c in dpool]
         if not (self.use_process and self.has_data()):

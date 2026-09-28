@@ -65,6 +65,9 @@ tracking evaluation, with identical caps):
   MEMORY_CARRY            the same learner; memory persists across worlds
   MEMORY_RANKONLY         ablation: persistent memory used for ranking only
                           (memory -> ranking, the failed v3 mechanism)
+  MEMORY_GENONLY          ablation: persistent memory controls generation,
+                          allocation and ranking; round-level options
+                          (attempt, shape, exploration, gate) stay default
 """
 import math
 import time
@@ -85,7 +88,8 @@ DIAGNOSTIC_ARMS = ("ORACLE_RANK",)   # dev-only headroom probes; never
 LEARNING_ARMS = ("ADAPTIVE_META", "NODIAG_META", "ADAPTIVE_NOCARRY")
 CARRY_ARMS = ("ADAPTIVE_META", "NODIAG_META")   # predictor persists across
                                                 # worlds; NOCARRY resets it
-PROCESS_ARMS = ("FROZEN", "NO_CARRY", "MEMORY_CARRY", "MEMORY_RANKONLY")
+PROCESS_ARMS = ("FROZEN", "NO_CARRY", "MEMORY_CARRY", "MEMORY_RANKONLY",
+                "MEMORY_GENONLY")
 ARMS = ARMS + PROCESS_ARMS
 
 HP = {
@@ -125,6 +129,10 @@ HP = {
     "gen_kappa": (0.0, 0.5, 1.0), "default_pref": 0.001,
     "alloc_value_temp": 0.01, "track_weight": 1.0, "return_weight": 0.5,
     "focus_max_mult": 3,
+    # default (uninformed) generation: "v3" = the v3 generator's own list
+    # (FROZEN == v3 FROZEN_META), "grid" = a shared random subset of the
+    # whole variant grid
+    "gen_default": "v3",
 }
 
 N_STATE = 15
@@ -1451,8 +1459,8 @@ def run_arm(arm, seed, hp=None):
 def process_controller(arm, hp):
     return C.ProcessController(
         hp, learn=arm != "FROZEN",
-        use_process=arm in ("NO_CARRY", "MEMORY_CARRY"),
-        use_rank=arm != "FROZEN")
+        use_process=arm in ("NO_CARRY", "MEMORY_CARRY", "MEMORY_GENONLY"),
+        use_rank=arm != "FROZEN", use_knobs=arm != "MEMORY_GENONLY")
 
 
 def run_process_arm(arm, seed, hp):

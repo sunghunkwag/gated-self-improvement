@@ -496,6 +496,13 @@ class TestProcessController(unittest.TestCase):
         last = rec["worlds"][-1]["rounds"]
         self.assertTrue(any(not all(rd["plan_default"].values())
                             for rd in last))
+        # the generation-only ablation never changes round-level options
+        go = self.runs["MEMORY_GENONLY"][1]
+        for w in go["worlds"]:
+            for rd in w["rounds"]:
+                self.assertTrue(all(rd["plan_default"].values()))
+        self.assertTrue(any(rd["pool_learned"] for w in go["worlds"][1:]
+                            for rd in w["rounds"]))
         # the rank-only ablation never changes the process
         ro = self.runs["MEMORY_RANKONLY"][1]
         for w in ro["worlds"]:
