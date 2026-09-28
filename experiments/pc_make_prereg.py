@@ -74,7 +74,8 @@ prereg = {
                            "3201-3300 (process-controller go/no-go)",
               "confirm": confirm,
               "never_used": "1-40, 101-200, 1001-1300 (v1/v2)"},
-    "arms": ["FROZEN", "NO_CARRY", "MEMORY_CARRY", "MEMORY_RANKONLY"],
+    "arms": ["FROZEN", "NO_CARRY", "MEMORY_CARRY", "MEMORY_GENONLY",
+             "MEMORY_RANKONLY"],
     "primary_metric": {
         "field": "ext", "split": E.PRIMARY_SPLIT,
         "definition": "per run: total number of FINAL-HOLDOUT tasks (24 "
@@ -88,20 +89,28 @@ prereg = {
         {"name": "H2_memory_carry_vs_frozen", "a": "MEMORY_CARRY",
          "b": "FROZEN", "role": "secondary"},
         {"name": "H3_no_carry_vs_frozen", "a": "NO_CARRY", "b": "FROZEN",
-         "role": "secondary"}],
+         "role": "secondary"},
+        {"name": "H4_carry_advantage_grows", "a": "MEMORY_CARRY",
+         "b": "NO_CARRY", "role": "secondary",
+         "field": "ext_late_minus_early",
+         "definition": "per run: final-holdout tasks solved in worlds "
+                       "6-10 minus worlds 1-5; the contrast is the growth "
+                       "of the MEMORY_CARRY - NO_CARRY advantage as "
+                       "experience accumulates"}],
     "statistics": {
         "test": "paired (by run seed) sign-flip permutation test, one-sided "
                 "H_a: mean(a - b) > 0, 20000 permutations from a fixed "
                 "deterministic stream",
         "multiplicity": "fixed-sequence gatekeeping: H1 (primary) is "
                         "tested alone at alpha; only if H1 is supported are "
-                        "H2 and H3 tested, Holm-adjusted between themselves "
-                        "at alpha (family-wise error <= alpha)",
+                        "H2, H3 and H4 tested, Holm-adjusted among "
+                        "themselves at alpha (family-wise error <= alpha)",
         "alpha": 0.05,
         "decision_rule": "supported iff mean(a - b) > 0 and the adjusted "
                          "p < alpha; otherwise reported as null"},
     "verification_spec": {"treatment": "MEMORY_CARRY",
                           "baselines": ["NO_CARRY", "FROZEN",
+                                        "MEMORY_GENONLY",
                                         "MEMORY_RANKONLY"]},
     "verification_checks": [
         "growth: per-world MEMORY_CARRY - NO_CARRY, second-half mean vs "
@@ -116,6 +125,8 @@ prereg = {
         "metered spend == global execution counter for every unit"],
     "exploratory_contrasts": [
         ["MEMORY_CARRY", "MEMORY_RANKONLY", "ext"],
+        ["MEMORY_CARRY", "MEMORY_GENONLY", "ext"],
+        ["MEMORY_GENONLY", "NO_CARRY", "ext"],
         ["MEMORY_RANKONLY", "FROZEN", "ext"],
         ["MEMORY_CARRY", "NO_CARRY", "in"],
         ["MEMORY_CARRY", "FROZEN", "in"]],
